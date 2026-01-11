@@ -1,3 +1,4 @@
+// NOTE: Build with "Tools > U(S)ART support > Disabled" to fit in 32KB flash
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -58,10 +59,9 @@ static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
 
 static uint32_t lastActivityMs = 0;
 
-// TODO: revert to analogWrite once flash size issue is resolved
-static inline void backlightFull() { digitalWrite(TFT_BL, LOW); }
-static inline void backlightDim()  { digitalWrite(TFT_BL, LOW); }
-static inline void backlightOff()  { digitalWrite(TFT_BL, HIGH); }
+static inline void backlightFull() { analogWrite(TFT_BL, 0); }
+static inline void backlightDim()  { analogWrite(TFT_BL, 210); }
+static inline void backlightOff()  { analogWrite(TFT_BL, 255); }
 
 static void setWakeupThreshold(uint16_t counts12) {
   counts12 &= 0x0FFF;
@@ -314,6 +314,8 @@ void loop() {
 
   if (elapsed >= DIM_TIMEOUT_MS) {
     backlightDim();
+  } else {
+    backlightFull();
   }
 
   int16_t rx, ry, rz;
@@ -329,6 +331,10 @@ void loop() {
   const float dead = 300.0f;
   float ux = (fdx > -dead && fdx < dead) ? 0.0f : fdx;
   float uy = (fdy > -dead && fdy < dead) ? 0.0f : fdy;
+
+  if (ux != 0.0f || uy != 0.0f) {
+    lastActivityMs = millis();
+  }
 
   const float accel_gain = 0.0008f;
   vel_x += ux * accel_gain;
