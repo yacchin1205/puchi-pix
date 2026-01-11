@@ -4,17 +4,17 @@
 
 // =====================
 // TFT配線（TFT表記準拠）
-//   VCC -> 3.3V
-//   GND -> GND
+//   VCC -> 3.3
 //   SCL -> PA_5 (SPI SCK)
 //   SDA -> PA_7 (SPI MOSI)
 //   RES -> VCC直結（コードでは未使用）
-//   DC  -> PA_1（例：混乱しないGPIOへ
-//   CS  -> PA_0（例：混乱しないGPIOへ）
-//   BL  -> 3.3V
+//   DC  -> PA_1
+//   CS  -> PA_0
+//   BL  -> PA_8 (PWM)
 // =====================
-static constexpr uint8_t TFT_CS = PA_0;   // ←あなたの実配線に合わせて
-static constexpr uint8_t TFT_DC = PA_1;   // ←あなたの実配線に合わせて
+static constexpr uint8_t TFT_CS = PA_0;
+static constexpr uint8_t TFT_DC = PA_1;
+static constexpr uint8_t TFT_BL = PA_8;
 
 // ST7735 128x160
 static constexpr int TFT_W = 128;
@@ -28,16 +28,68 @@ static constexpr uint8_t Y_OFFSET = 1;
 // KXTJ3 (I2C)
 //   SDA -> PB_7
 //   SCL -> PB_6
+//   INT -> PA_4
 // =====================
 static const uint8_t KXTJ3_ADDR     = 0x0E;
 static const uint8_t REG_CTRL1      = 0x1B;
+static const uint8_t REG_CTRL2      = 0x1D;
+static const uint8_t REG_INT_CTRL1  = 0x1E;
+static const uint8_t REG_INT_CTRL2  = 0x1F;
 static const uint8_t REG_DATA_CTRL  = 0x21;
 static const uint8_t REG_XOUT_L     = 0x06;
+static const uint8_t REG_INT_REL    = 0x1A;
+static const uint8_t REG_WU_COUNTER = 0x29;
+static const uint8_t REG_WUTH_H     = 0x6A;
+static const uint8_t REG_WUTH_L     = 0x6B;
 
-// LED（任意：動いてる時点灯）
-static const uint32_t LED_PIN = PA_4;
-static inline void ledWrite(bool on) {
-  digitalWrite(LED_PIN, on ? HIGH : LOW); // 逆なら入れ替え
+static constexpr uint32_t KXTJ3_INT_PIN = PA_4;
+
+// ---------- KXTJ3 low-level ----------
+static inline void write8(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(KXTJ3_ADDR);
+  Wire.write(reg);
+  Wire.write(val);
+  Wire.endTransmission(true);
+}
+
+// ---------- Backlight / Sleep ----------
+static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
+static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
+
+static uint32_t lastActivityMs = 0;
+
+// TODO: revert to analogWrite once flash size issue is resolved
+static inline void backlightFull() { digitalWrite(TFT_BL, LOW); }
+static inline void backlightDim()  { digitalWrite(TFT_BL, LOW); }
+static inline void backlightOff()  { digitalWrite(TFT_BL, HIGH); }
+
+static void setWakeupThreshold(uint16_t counts12) {
+  counts12 &= 0x0FFF;
+  write8(REG_WUTH_H, (counts12 >> 4) & 0xFF);
+  write8(REG_WUTH_L, (counts12 & 0x0F) << 4);
+}
+
+static void clearLatchedInterrupt() {
+  Wire.beginTransmission(KXTJ3_ADDR);
+  Wire.write(REG_INT_REL);
+  Wire.endTransmission(false);
+  Wire.requestFrom(KXTJ3_ADDR, (uint8_t)1);
+  (void)Wire.read();
+}
+
+static void enableWakeupInterrupt() {
+  write8(REG_CTRL1, 0x00); delay(10);
+  write8(REG_CTRL2, 0x04);
+  write8(REG_WU_COUNTER, 2);
+  setWakeupThreshold(64);
+  write8(REG_INT_CTRL2, 0x3F);
+  write8(REG_INT_CTRL1, 0x20);
+  write8(REG_CTRL1, 0x82); delay(50);
+  clearLatchedInterrupt();
+}
+
+void wakeupCallback() {
+  lastActivityMs = millis();
 }
 
 // ---------- TFT low-level ----------
@@ -178,12 +230,6 @@ static void tftInit_ST7735_18bit() {
 }
 
 // ---------- KXTJ3 ----------
-static inline void write8(uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(KXTJ3_ADDR);
-  Wire.write(reg);
-  Wire.write(val);
-  Wire.endTransmission(true);
-}
 static bool readXYZ_raw(int16_t &x, int16_t &y, int16_t &z) {
   Wire.beginTransmission(KXTJ3_ADDR);
   Wire.write(REG_XOUT_L);
@@ -227,9 +273,6 @@ static void calibrateKXTJ3(uint8_t samples=80) {
 }
 
 void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  ledWrite(false);
-
   Wire.setSDA(PB_7);
   Wire.setSCL(PB_6);
   Wire.begin();
@@ -237,20 +280,42 @@ void setup() {
 
   write8(REG_CTRL1, 0x00); delay(10);
   write8(REG_DATA_CTRL, 0x02); delay(10);
-  write8(REG_CTRL1, 0x80); delay(50);
+  enableWakeupInterrupt();
 
   tftInit_ST7735_18bit();
+  pinMode(TFT_BL, OUTPUT);
+  backlightFull();
 
-  // 背景を黒に
   tftFillScreen888(0, 0, 0);
 
   pos_x = TFT_W * 0.5f;
   pos_y = TFT_H * 0.5f;
 
   calibrateKXTJ3(80);
+
+  attachInterrupt(digitalPinToInterrupt(KXTJ3_INT_PIN), wakeupCallback, FALLING);
+
+  lastActivityMs = millis();
 }
 
 void loop() {
+  uint32_t elapsed = millis() - lastActivityMs;
+
+  if (elapsed >= SLEEP_TIMEOUT_MS) {
+    backlightOff();
+    clearLatchedInterrupt();
+    HAL_SuspendTick();
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+    HAL_ResumeTick();
+    backlightFull();
+    lastActivityMs = millis();
+    return;
+  }
+
+  if (elapsed >= DIM_TIMEOUT_MS) {
+    backlightDim();
+  }
+
   int16_t rx, ry, rz;
   if (!calibrated || !readXYZ_raw(rx, ry, rz)) return;
 
@@ -305,9 +370,6 @@ void loop() {
 
   prev_cx = cx;
   prev_cy = cy;
-
-  bool moving = (vel_x > 0.3f || vel_x < -0.3f || vel_y > 0.3f || vel_y < -0.3f);
-  ledWrite(moving);
 
   delay(30);
 }
