@@ -4,26 +4,40 @@
 #include <SPI.h>
 
 // =====================
-// TFT配線（TFT表記準拠）
-//   VCC -> 3.3
+// ディスプレイ選択: コメントアウトでST7735 TFT
+// =====================
+// #define USE_SSD1351
+
+// =====================
+// 共通ピン定義
 //   SCL -> PA_5 (SPI SCK)
 //   SDA -> PA_7 (SPI MOSI)
-//   RES -> VCC直結（コードでは未使用）
 //   DC  -> PA_1
 //   CS  -> PA_0
-//   BL  -> PA_8 (PWM)
 // =====================
 static constexpr uint8_t TFT_CS = PA_0;
 static constexpr uint8_t TFT_DC = PA_1;
-static constexpr uint8_t TFT_BL = PA_8;
 
-// ST7735 128x160
+#ifdef USE_SSD1351
+// SSD1351 OLED 128x128
+static constexpr int TFT_W = 128;
+static constexpr int TFT_H = 128;
+static constexpr uint8_t X_OFFSET = 0;
+static constexpr uint8_t Y_OFFSET = 0;
+// 加速度センサー座標反転 (SSD1351用)
+static constexpr int ACCEL_X_SIGN = -1;
+static constexpr int ACCEL_Y_SIGN = -1;
+#else
+// ST7735 TFT 128x160
 static constexpr int TFT_W = 128;
 static constexpr int TFT_H = 160;
-
-// オフセット（確定）
 static constexpr uint8_t X_OFFSET = 2;
 static constexpr uint8_t Y_OFFSET = 1;
+static constexpr uint8_t TFT_BL = PA_8;
+// 加速度センサー座標反転 (ST7735用)
+static constexpr int ACCEL_X_SIGN = 1;
+static constexpr int ACCEL_Y_SIGN = 1;
+#endif
 
 // =====================
 // KXTJ3 (I2C)
@@ -53,15 +67,27 @@ static inline void write8(uint8_t reg, uint8_t val) {
   Wire.endTransmission(true);
 }
 
-// ---------- Backlight / Sleep ----------
+// ---------- Display Power / Sleep ----------
 static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
 static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
 
 static uint32_t lastActivityMs = 0;
 
+#ifdef USE_SSD1351
+// OLED用: 前方宣言
+static void oledDisplayOn();
+static void oledDisplayOff();
+static void oledSetContrast(uint8_t level);
+
+static inline void backlightFull() { oledDisplayOn(); oledSetContrast(0x0F); }
+static inline void backlightDim()  { oledSetContrast(0x05); }
+static inline void backlightOff()  { oledDisplayOff(); }
+#else
+// TFT用: PWMバックライト
 static inline void backlightFull() { analogWrite(TFT_BL, 0); }
 static inline void backlightDim()  { analogWrite(TFT_BL, 210); }
 static inline void backlightOff()  { analogWrite(TFT_BL, 255); }
+#endif
 
 static void setWakeupThreshold(uint16_t counts12) {
   counts12 &= 0x0FFF;
@@ -110,43 +136,103 @@ static inline void tftWriteDataN(const uint8_t* p, uint8_t n) {
   digitalWrite(TFT_CS, HIGH);
 }
 
-// CS LOWのまま cmd+data を送る（初期化の安定化）
 static inline void tftWriteCommandData(uint8_t cmd, const uint8_t* data, uint8_t n) {
   digitalWrite(TFT_CS, LOW);
-
   dcCommand();
   SPI.transfer(cmd);
-
   if (n) {
     dcData();
     while (n--) SPI.transfer(*data++);
   }
-
   digitalWrite(TFT_CS, HIGH);
 }
 
+// ---------- Address Window ----------
+#ifdef USE_SSD1351
+static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+  uint8_t dataX[2] = { (uint8_t)(x0 + X_OFFSET), (uint8_t)(x1 + X_OFFSET) };
+  tftWriteCommandData(0x15, dataX, 2);
+  uint8_t dataY[2] = { (uint8_t)(y0 + Y_OFFSET), (uint8_t)(y1 + Y_OFFSET) };
+  tftWriteCommandData(0x75, dataY, 2);
+  tftWriteCommand(0x5C);
+}
+#else
 static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
   x0 += X_OFFSET; x1 += X_OFFSET;
   y0 += Y_OFFSET; y1 += Y_OFFSET;
-
-  tftWriteCommand(0x2A); // CASET
+  tftWriteCommand(0x2A);
   uint8_t dataX[4] = { 0, (uint8_t)x0, 0, (uint8_t)x1 };
   tftWriteDataN(dataX, 4);
-
-  tftWriteCommand(0x2B); // RASET
+  tftWriteCommand(0x2B);
   uint8_t dataY[4] = { 0, (uint8_t)y0, 0, (uint8_t)y1 };
   tftWriteDataN(dataY, 4);
+  tftWriteCommand(0x2C);
+}
+#endif
 
-  tftWriteCommand(0x2C); // RAMWR
+// ---------- Color / Fill ----------
+#ifdef USE_SSD1351
+// RGB565 (16bit)
+static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
-// 18bit(RGB888)で同色塗りつぶし
 static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
-  tftSetAddrWindow(0, 0, TFT_W - 1, TFT_H - 1);
+  uint16_t c = rgb565(r, g, b);
+  uint8_t hi = c >> 8, lo = c & 0xFF;
 
+  digitalWrite(TFT_CS, LOW);
+  digitalWrite(TFT_DC, LOW);
+  SPI.transfer(0x15);
+  digitalWrite(TFT_DC, HIGH);
+  SPI.transfer(0x00);
+  SPI.transfer(0x7F);
+  digitalWrite(TFT_CS, HIGH);
+
+  digitalWrite(TFT_CS, LOW);
+  digitalWrite(TFT_DC, LOW);
+  SPI.transfer(0x75);
+  digitalWrite(TFT_DC, HIGH);
+  SPI.transfer(0x00);
+  SPI.transfer(0x7F);
+  digitalWrite(TFT_CS, HIGH);
+
+  digitalWrite(TFT_CS, LOW);
+  digitalWrite(TFT_DC, LOW);
+  SPI.transfer(0x5C);
+  digitalWrite(TFT_DC, HIGH);
+  for (uint32_t i = 0; i < (uint32_t)TFT_W * TFT_H; i++) {
+    SPI.transfer(hi);
+    SPI.transfer(lo);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+static inline void tftHLine888(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b) {
+  if ((uint16_t)y >= TFT_H || w <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (x + w > TFT_W) w = TFT_W - x;
+  if (w <= 0) return;
+
+  uint16_t c = rgb565(r, g, b);
+  uint8_t hi = c >> 8, lo = c & 0xFF;
+
+  tftSetAddrWindow((uint16_t)x, (uint16_t)y, (uint16_t)(x + w - 1), (uint16_t)y);
   dcData();
   digitalWrite(TFT_CS, LOW);
-  for (uint32_t i = 0; i < (uint32_t)TFT_W * (uint32_t)TFT_H; i++) {
+  while (w--) {
+    SPI.transfer(hi);
+    SPI.transfer(lo);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+#else
+// RGB888 (18bit)
+static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
+  tftSetAddrWindow(0, 0, TFT_W - 1, TFT_H - 1);
+  dcData();
+  digitalWrite(TFT_CS, LOW);
+  for (uint32_t i = 0; i < (uint32_t)TFT_W * TFT_H; i++) {
     SPI.transfer(r);
     SPI.transfer(g);
     SPI.transfer(b);
@@ -154,7 +240,6 @@ static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
   digitalWrite(TFT_CS, HIGH);
 }
 
-// 18bit水平線
 static inline void tftHLine888(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b) {
   if ((uint16_t)y >= TFT_H || w <= 0) return;
   if (x < 0) { w += x; x = 0; }
@@ -162,7 +247,6 @@ static inline void tftHLine888(int x, int y, int w, uint8_t r, uint8_t g, uint8_
   if (w <= 0) return;
 
   tftSetAddrWindow((uint16_t)x, (uint16_t)y, (uint16_t)(x + w - 1), (uint16_t)y);
-
   dcData();
   digitalWrite(TFT_CS, LOW);
   while (w--) {
@@ -172,18 +256,18 @@ static inline void tftHLine888(int x, int y, int w, uint8_t r, uint8_t g, uint8_
   }
   digitalWrite(TFT_CS, HIGH);
 }
+#endif
 
-// 18bit塗りつぶし円（sqrtf無し）
-static void tftFillCircle888(int x0, int y0, int r, uint8_t r8, uint8_t g8, uint8_t b8) {
-  if (r <= 0) return;
+static void tftFillCircle888(int x0, int y0, int rad, uint8_t r8, uint8_t g8, uint8_t b8) {
+  if (rad <= 0) return;
 
-  int f = 1 - r;
+  int f = 1 - rad;
   int ddF_x = 1;
-  int ddF_y = -2 * r;
+  int ddF_y = -2 * rad;
   int x = 0;
-  int y = r;
+  int y = rad;
 
-  tftHLine888(x0 - r, y0, 2 * r + 1, r8, g8, b8);
+  tftHLine888(x0 - rad, y0, 2 * rad + 1, r8, g8, b8);
 
   while (x < y) {
     if (f >= 0) {
@@ -202,7 +286,22 @@ static void tftFillCircle888(int x0, int y0, int r, uint8_t r8, uint8_t g8, uint
   }
 }
 
-static void tftInit_ST7735_18bit() {
+// ---------- Display Init ----------
+#ifdef USE_SSD1351
+static void oledDisplayOn() {
+  tftWriteCommandData(0xAF, nullptr, 0);
+}
+
+static void oledDisplayOff() {
+  tftWriteCommandData(0xAE, nullptr, 0);
+}
+
+static void oledSetContrast(uint8_t level) {
+  uint8_t d[] = { (uint8_t)(level & 0x0F) };
+  tftWriteCommandData(0xC7, d, 1);
+}
+
+static void tftInit() {
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
@@ -210,24 +309,60 @@ static void tftInit_ST7735_18bit() {
 
   SPI.setSCLK(PA_5);
   SPI.setMOSI(PA_7);
-  SPI.setMISO(PA_6);   // 未接続でOK
+  SPI.setMISO(PA_6);
+  SPI.begin();
+  SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE3));
+
+  { const uint8_t d[] = { 0x12 }; tftWriteCommandData(0xFD, d, 1); }
+  { const uint8_t d[] = { 0xB1 }; tftWriteCommandData(0xFD, d, 1); }
+  tftWriteCommandData(0xAE, nullptr, 0);
+  delay(10);
+  { const uint8_t d[] = { 0xF1 }; tftWriteCommandData(0xB3, d, 1); }
+  { const uint8_t d[] = { 0x7F }; tftWriteCommandData(0xCA, d, 1); }
+  { const uint8_t d[] = { 0x74 }; tftWriteCommandData(0xA0, d, 1); }
+  { const uint8_t d[] = { 0x00 }; tftWriteCommandData(0xA1, d, 1); }
+  { const uint8_t d[] = { 0x00 }; tftWriteCommandData(0xA2, d, 1); }
+  { const uint8_t d[] = { 0x00 }; tftWriteCommandData(0xB5, d, 1); }
+  { const uint8_t d[] = { 0x01 }; tftWriteCommandData(0xAB, d, 1); }
+  { const uint8_t d[] = { 0x32 }; tftWriteCommandData(0xB1, d, 1); }
+  { const uint8_t d[] = { 0x17 }; tftWriteCommandData(0xBB, d, 1); }
+  { const uint8_t d[] = { 0x05 }; tftWriteCommandData(0xBE, d, 1); }
+  { const uint8_t d[] = { 0xC8, 0x80, 0xC8 }; tftWriteCommandData(0xC1, d, 3); }
+  { const uint8_t d[] = { 0x0F }; tftWriteCommandData(0xC7, d, 1); }
+  { const uint8_t d[] = { 0x01 }; tftWriteCommandData(0xB6, d, 1); }
+  tftWriteCommandData(0xA6, nullptr, 0);
+  tftWriteCommandData(0xAF, nullptr, 0);
+  delay(100);
+
+  tftFillScreen888(0, 0, 0);
+}
+#else
+static void tftInit() {
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_DC, HIGH);
+
+  SPI.setSCLK(PA_5);
+  SPI.setMOSI(PA_7);
+  SPI.setMISO(PA_6);
   SPI.begin();
 
-  tftWriteCommandData(0x01, nullptr, 0); delay(150); // SWRESET
-  tftWriteCommandData(0x11, nullptr, 0); delay(150); // SLPOUT
-
-  // COLMOD: 18-bit
+  tftWriteCommandData(0x01, nullptr, 0); delay(150);
+  tftWriteCommandData(0x11, nullptr, 0); delay(150);
   { const uint8_t d[] = { 0x06 }; tftWriteCommandData(0x3A, d, 1); }
   delay(10);
-
-  // MADCTL: まずは0x00でOK（向きが合わなければ後で調整）
   { const uint8_t d[] = { 0x00 }; tftWriteCommandData(0x36, d, 1); }
   delay(10);
+  tftWriteCommandData(0x20, nullptr, 0); delay(10);
+  tftWriteCommandData(0x13, nullptr, 0); delay(10);
+  tftWriteCommandData(0x29, nullptr, 0); delay(120);
 
-  tftWriteCommandData(0x20, nullptr, 0); delay(10); // INVOFF
-  tftWriteCommandData(0x13, nullptr, 0); delay(10); // NORON
-  tftWriteCommandData(0x29, nullptr, 0); delay(120); // DISPON
+  pinMode(TFT_BL, OUTPUT);
+  backlightFull();
+  tftFillScreen888(0, 0, 0);
 }
+#endif
 
 // ---------- KXTJ3 ----------
 static bool readXYZ_raw(int16_t &x, int16_t &y, int16_t &z) {
@@ -282,11 +417,7 @@ void setup() {
   write8(REG_DATA_CTRL, 0x02); delay(10);
   enableWakeupInterrupt();
 
-  tftInit_ST7735_18bit();
-  pinMode(TFT_BL, OUTPUT);
-  backlightFull();
-
-  tftFillScreen888(0, 0, 0);
+  tftInit();
 
   pos_x = TFT_W * 0.5f;
   pos_y = TFT_H * 0.5f;
@@ -321,8 +452,8 @@ void loop() {
   int16_t rx, ry, rz;
   if (!calibrated || !readXYZ_raw(rx, ry, rz)) return;
 
-  int16_t dx = x_ref - rx;
-  int16_t dy = ry - y_ref;
+  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
+  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
 
   const float alpha = 0.20f;
   fdx = (1.0f - alpha) * fdx + alpha * (float)dx;
@@ -368,9 +499,7 @@ void loop() {
     tftFillCircle888(prev_cx, prev_cy, r + 1, 0, 0, 0);
   }
 
-  // 赤いボール
   tftFillCircle888(cx, cy, r, 255, 0, 0);
-  // ハイライト
   int hr = (r/5) ? (r/5) : 1;
   tftFillCircle888(cx - r/3, cy - r/3, hr, 255, 255, 255);
 
