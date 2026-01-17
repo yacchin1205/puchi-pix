@@ -328,7 +328,7 @@ void loop() {
   fdx = (1.0f - alpha) * fdx + alpha * (float)dx;
   fdy = (1.0f - alpha) * fdy + alpha * (float)dy;
 
-  const float dead = 300.0f;
+  const float dead = 5000.0f;
   float ux = (fdx > -dead && fdx < dead) ? 0.0f : fdx;
   float uy = (fdy > -dead && fdy < dead) ? 0.0f : fdy;
 
