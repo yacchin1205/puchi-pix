@@ -4,9 +4,10 @@
 #include <SPI.h>
 
 // =====================
-// ディスプレイ選択: コメントアウトでST7735 TFT
-//  =====================
-#define USE_SSD1351
+// ディスプレイ選択: いずれか1つをdefine (両方コメントアウトでST7735 TFT)
+// =====================
+// #define USE_SSD1351
+#define USE_SSD1331
 
 // =====================
 // 共通ピン定義
@@ -18,13 +19,22 @@
 static constexpr uint8_t TFT_CS = PA_0;
 static constexpr uint8_t TFT_DC = PA_1;
 
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351)
 // SSD1351 OLED 128x128
 static constexpr int TFT_W = 128;
 static constexpr int TFT_H = 128;
 static constexpr uint8_t X_OFFSET = 0;
 static constexpr uint8_t Y_OFFSET = 0;
 // 加速度センサー座標反転 (SSD1351用)
+static constexpr int ACCEL_X_SIGN = -1;
+static constexpr int ACCEL_Y_SIGN = -1;
+#elif defined(USE_SSD1331)
+// SSD1331 OLED 96x64
+static constexpr int TFT_W = 96;
+static constexpr int TFT_H = 64;
+static constexpr uint8_t X_OFFSET = 0;
+static constexpr uint8_t Y_OFFSET = 0;
+// 加速度センサー座標反転 (SSD1331用 - 要調整)
 static constexpr int ACCEL_X_SIGN = -1;
 static constexpr int ACCEL_Y_SIGN = -1;
 #else
@@ -216,7 +226,7 @@ static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
 
 static uint32_t lastActivityMs = 0;
 
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
 // OLED用: 前方宣言
 static void oledDisplayOn();
 static void oledDisplayOff();
@@ -291,13 +301,30 @@ static inline void tftWriteCommandData(uint8_t cmd, const uint8_t* data, uint8_t
 }
 
 // ---------- Address Window ----------
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351)
 static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
   uint8_t dataX[2] = { (uint8_t)(x0 + X_OFFSET), (uint8_t)(x1 + X_OFFSET) };
   tftWriteCommandData(0x15, dataX, 2);
   uint8_t dataY[2] = { (uint8_t)(y0 + Y_OFFSET), (uint8_t)(y1 + Y_OFFSET) };
   tftWriteCommandData(0x75, dataY, 2);
   tftWriteCommand(0x5C);
+}
+#elif defined(USE_SSD1331)
+static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+  // SSD1331: all bytes with D/C=LOW
+  digitalWrite(TFT_CS, LOW);
+  dcCommand();
+  SPI.transfer(0x15);
+  SPI.transfer((uint8_t)(x0 + X_OFFSET));
+  SPI.transfer((uint8_t)(x1 + X_OFFSET));
+  digitalWrite(TFT_CS, HIGH);
+
+  digitalWrite(TFT_CS, LOW);
+  dcCommand();
+  SPI.transfer(0x75);
+  SPI.transfer((uint8_t)(y0 + Y_OFFSET));
+  SPI.transfer((uint8_t)(y1 + Y_OFFSET));
+  digitalWrite(TFT_CS, HIGH);
 }
 #else
 static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
@@ -314,7 +341,7 @@ static inline void tftSetAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint1
 #endif
 
 // ---------- Color / Fill ----------
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
 // RGB565 (16bit)
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -324,6 +351,7 @@ static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
   uint16_t c = rgb565(r, g, b);
   uint8_t hi = c >> 8, lo = c & 0xFF;
 
+#if defined(USE_SSD1351)
   digitalWrite(TFT_CS, LOW);
   digitalWrite(TFT_DC, LOW);
   SPI.transfer(0x15);
@@ -344,6 +372,28 @@ static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
   digitalWrite(TFT_DC, LOW);
   SPI.transfer(0x5C);
   digitalWrite(TFT_DC, HIGH);
+#else
+  // SSD1331: pixel-by-pixel fill (address window + pixel data)
+  // Set column address (0x15): all bytes D/C=LOW
+  digitalWrite(TFT_CS, LOW);
+  dcCommand();
+  SPI.transfer(0x15);
+  SPI.transfer(0x00);  // col start
+  SPI.transfer(0x5F);  // col end (95)
+  digitalWrite(TFT_CS, HIGH);
+
+  // Set row address (0x75): all bytes D/C=LOW
+  digitalWrite(TFT_CS, LOW);
+  dcCommand();
+  SPI.transfer(0x75);
+  SPI.transfer(0x00);  // row start
+  SPI.transfer(0x3F);  // row end (63)
+  digitalWrite(TFT_CS, HIGH);
+
+  // Write pixel data: D/C=HIGH
+  digitalWrite(TFT_CS, LOW);
+  dcData();
+#endif
   for (uint32_t i = 0; i < (uint32_t)TFT_W * TFT_H; i++) {
     SPI.transfer(hi);
     SPI.transfer(lo);
@@ -369,7 +419,7 @@ static inline void tftHLine888(int x, int y, int w, uint8_t r, uint8_t g, uint8_
   }
   digitalWrite(TFT_CS, HIGH);
 }
-#else
+#else  // ST7735
 // RGB888 (18bit)
 static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
   tftSetAddrWindow(0, 0, TFT_W - 1, TFT_H - 1);
@@ -430,7 +480,7 @@ static void tftFillCircle888(int x0, int y0, int rad, uint8_t r8, uint8_t g8, ui
 }
 
 // ---------- 矩形塗りつぶし (画像表示用) ----------
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
 static void tftFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
   if (x >= TFT_W || y >= TFT_H) return;
   if (x + w > TFT_W) w = TFT_W - x;
@@ -446,7 +496,7 @@ static void tftFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t
   }
   digitalWrite(TFT_CS, HIGH);
 }
-#else
+#else  // ST7735
 static void tftFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
   if (x >= TFT_W || y >= TFT_H) return;
   if (x + w > TFT_W) w = TFT_W - x;
@@ -484,13 +534,13 @@ static void drawFrameRow(uint16_t startX, uint16_t py, const uint8_t* rowData, c
     for (uint8_t ix = 0; ix < IMG_W; ix++) {
       uint8_t idx = pgm_read_byte(&rowData[ix]);
       uint16_t color = pgm_read_word(&imgPalette[idx]);
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
       uint8_t hi = color >> 8, lo = color & 0xFF;
       for (uint8_t sx = 0; sx < IMG_SCALE; sx++) {
         SPI.transfer(hi);
         SPI.transfer(lo);
       }
-#else
+#else  // ST7735
       uint8_t r = (color >> 8) & 0xF8;
       uint8_t g = (color >> 3) & 0xFC;
       uint8_t b = (color << 3) & 0xF8;
@@ -525,7 +575,7 @@ static void drawFrame(uint8_t frameIdx) {
 }
 
 // ---------- Display Init ----------
-#ifdef USE_SSD1351
+#if defined(USE_SSD1351)
 static void oledDisplayOn() {
   tftWriteCommandData(0xAF, nullptr, 0);
 }
@@ -574,7 +624,60 @@ static void tftInit() {
 
   tftFillScreen888(0, 0, 0);
 }
-#else
+#elif defined(USE_SSD1331)
+static void oledDisplayOn() {
+  tftWriteCommandData(0xAF, nullptr, 0);
+}
+
+static void oledDisplayOff() {
+  tftWriteCommandData(0xAE, nullptr, 0);
+}
+
+static void oledSetContrast(uint8_t level) {
+  // SSD1331: Master Current Control (0x87), 0-15
+  uint8_t d[] = { (uint8_t)(level & 0x0F) };
+  tftWriteCommandData(0x87, d, 1);
+}
+
+static void tftInit() {
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_DC, HIGH);
+
+  SPI.setSCLK(PA_5);
+  SPI.setMOSI(PA_7);
+  SPI.setMISO(PA_6);
+  SPI.begin();
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+
+  // SSD1331 init: all bytes sent with D/C=LOW (like Adafruit)
+  tftWriteCommand(0xAE);  // Display OFF
+  delay(100);
+  tftWriteCommand(0xA0); tftWriteCommand(0x72);  // Remap: 65k, RGB, scan/column remap
+  tftWriteCommand(0xA1); tftWriteCommand(0x00);  // Start line 0
+  tftWriteCommand(0xA2); tftWriteCommand(0x00);  // Display offset 0
+  tftWriteCommand(0xA4);  // Normal display
+  tftWriteCommand(0xA8); tftWriteCommand(0x3F);  // MUX ratio: 64
+  tftWriteCommand(0xAD); tftWriteCommand(0x8E);  // Master config
+  tftWriteCommand(0xB0); tftWriteCommand(0x0B);  // Power save OFF
+  tftWriteCommand(0xB1); tftWriteCommand(0x31);  // Phase period adj
+  tftWriteCommand(0xB3); tftWriteCommand(0xF0);  // Clock divider
+  tftWriteCommand(0x8A); tftWriteCommand(0x64);  // Precharge A
+  tftWriteCommand(0x8B); tftWriteCommand(0x78);  // Precharge B
+  tftWriteCommand(0x8C); tftWriteCommand(0x64);  // Precharge C
+  tftWriteCommand(0xBB); tftWriteCommand(0x3A);  // Precharge level
+  tftWriteCommand(0xBE); tftWriteCommand(0x3E);  // VCOMH
+  tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current
+  tftWriteCommand(0x81); tftWriteCommand(0x91);  // Contrast A
+  tftWriteCommand(0x82); tftWriteCommand(0x50);  // Contrast B
+  tftWriteCommand(0x83); tftWriteCommand(0x7D);  // Contrast C
+  tftWriteCommand(0xAF);  // Display ON
+  delay(100);
+
+  tftFillScreen888(0, 0, 0);  // Clear to black
+}
+#else  // ST7735
 static void tftInit() {
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
