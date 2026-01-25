@@ -240,26 +240,10 @@ static void tftFillScreen888(uint8_t r, uint8_t g, uint8_t b) {
   SPI.transfer(0x5C);
   digitalWrite(TFT_DC, HIGH);
 #else
-  // SSD1331: pixel-by-pixel fill (address window + pixel data)
-  // Set column address (0x15): all bytes D/C=LOW
-  digitalWrite(TFT_CS, LOW);
-  dcCommand();
-  SPI.transfer(0x15);
-  SPI.transfer(0x00);  // col start
-  SPI.transfer(0x5F);  // col end (95)
-  digitalWrite(TFT_CS, HIGH);
-
-  // Set row address (0x75): all bytes D/C=LOW
-  digitalWrite(TFT_CS, LOW);
-  dcCommand();
-  SPI.transfer(0x75);
-  SPI.transfer(0x00);  // row start
-  SPI.transfer(0x3F);  // row end (63)
-  digitalWrite(TFT_CS, HIGH);
-
-  // Write pixel data: D/C=HIGH
-  digitalWrite(TFT_CS, LOW);
+  // SSD1331: use tftSetAddrWindow for consistency
+  tftSetAddrWindow(0, 0, TFT_W - 1, TFT_H - 1);
   dcData();
+  digitalWrite(TFT_CS, LOW);
 #endif
   for (uint32_t i = 0; i < (uint32_t)TFT_W * TFT_H; i++) {
     SPI.transfer(hi);
@@ -387,19 +371,40 @@ static void tftFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t
 #endif
 
 // ---------- 画像描画 (瞬きアニメーション対応) ----------
+// Orientation: 0=normal, 1=90°CW(左傾き), 2=90°CCW(右傾き), 3=180°(上傾き)
+static uint8_t currentOrient = 0;
 static int8_t lastDrawnFrame = -1;  // -1 = 未描画
 
-// ベースフレーム全体を描画
-static void drawBaseFrame() {
-  uint16_t startX = (TFT_W - IMG_W) / 2;
-  uint16_t startY = (TFT_H - IMG_H) / 2;
+// 回転に応じた開始X座標
+static inline uint16_t getStartX(uint8_t orient) {
+  if (orient == 1) return 0;                    // 90°CW: 左端
+  if (orient == 2) return TFT_W - IMG_W;        // 90°CCW: 右端
+  return (TFT_W - IMG_W) / 2;                   // 0°/180°: 中央
+}
 
-  for (uint8_t iy = 0; iy < IMG_H; iy++) {
-    tftSetAddrWindow(startX, startY + iy, startX + IMG_W - 1, startY + iy);
+// 回転に応じたソースピクセル座標変換
+static inline uint16_t getSrcIndex(uint8_t x, uint8_t y, uint8_t orient, uint8_t w, uint8_t h) {
+  uint8_t srcX, srcY;
+  switch (orient) {
+    case 1:  srcX = y; srcY = (h - 1) - x; break;        // 90°CW
+    case 2:  srcX = (w - 1) - y; srcY = x; break;        // 90°CCW
+    case 3:  srcX = (w - 1) - x; srcY = (h - 1) - y; break; // 180°
+    default: srcX = x; srcY = y; break;                  // 0°
+  }
+  return (uint16_t)srcY * w + srcX;
+}
+
+// ベースフレームの指定領域を描画
+static void drawBaseFrameRegion(uint8_t orient, uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
+  uint16_t screenX = getStartX(orient) + x;
+  uint16_t screenY = y;
+
+  for (uint8_t dy = 0; dy < h; dy++) {
+    tftSetAddrWindow(screenX, screenY + dy, screenX + w - 1, screenY + dy);
     dcData();
     digitalWrite(TFT_CS, LOW);
-    for (uint8_t ix = 0; ix < IMG_W; ix++) {
-      uint8_t idx = pgm_read_byte(&baseFrame[(uint16_t)iy * IMG_W + ix]);
+    for (uint8_t dx = 0; dx < w; dx++) {
+      uint8_t idx = pgm_read_byte(&baseFrame[getSrcIndex(x + dx, y + dy, orient, IMG_W, IMG_H)]);
       uint16_t color = pgm_read_word(&basePalette[idx]);
 #if defined(USE_SSD1351) || defined(USE_SSD1331)
       SPI.transfer(color >> 8);
@@ -414,19 +419,35 @@ static void drawBaseFrame() {
   }
 }
 
-// 目領域のみ描画 (eyeData: eyeHalf or eyeClosed, palette: 対応するパレット)
-static void drawEyeRegion(const uint8_t* eyeData, const uint16_t* palette) {
-  uint16_t startX = (TFT_W - IMG_W) / 2;
-  uint16_t startY = (TFT_H - IMG_H) / 2;
+// ベースフレーム全体を描画
+static void drawBaseFrame(uint8_t orient) {
+  drawBaseFrameRegion(orient, 0, 0, IMG_W, IMG_H);
+}
 
-  for (uint8_t ey = 0; ey < EYE_H; ey++) {
-    uint16_t screenY = startY + EYE_Y + ey;
-    uint16_t screenX = startX + EYE_X;
-    tftSetAddrWindow(screenX, screenY, screenX + EYE_W - 1, screenY);
+// 目領域の描画先座標とサイズを取得
+static void getEyeImageRect(uint8_t orient, uint8_t& x, uint8_t& y, uint8_t& w, uint8_t& h) {
+  switch (orient) {
+    case 1:  x = 63 - (EYE_Y + EYE_H - 1); y = EYE_X; w = EYE_H; h = EYE_W; break;
+    case 2:  x = EYE_Y; y = 63 - (EYE_X + EYE_W - 1); w = EYE_H; h = EYE_W; break;
+    case 3:  x = 63 - (EYE_X + EYE_W - 1); y = 63 - (EYE_Y + EYE_H - 1); w = EYE_W; h = EYE_H; break;
+    default: x = EYE_X; y = EYE_Y; w = EYE_W; h = EYE_H; break;
+  }
+}
+
+
+// 目領域のみ描画
+static void drawEyeRegion(uint8_t orient, const uint8_t* eyeData, const uint16_t* palette) {
+  uint8_t x, y, w, h;
+  getEyeImageRect(orient, x, y, w, h);
+  uint16_t screenX = getStartX(orient) + x;
+  uint16_t screenY = y;
+
+  for (uint8_t dy = 0; dy < h; dy++) {
+    tftSetAddrWindow(screenX, screenY + dy, screenX + w - 1, screenY + dy);
     dcData();
     digitalWrite(TFT_CS, LOW);
-    for (uint8_t ex = 0; ex < EYE_W; ex++) {
-      uint8_t idx = pgm_read_byte(&eyeData[(uint16_t)ey * EYE_W + ex]);
+    for (uint8_t dx = 0; dx < w; dx++) {
+      uint8_t idx = pgm_read_byte(&eyeData[getSrcIndex(dx, dy, orient, EYE_W, EYE_H)]);
       uint16_t color = pgm_read_word(&palette[idx]);
 #if defined(USE_SSD1351) || defined(USE_SSD1331)
       SPI.transfer(color >> 8);
@@ -441,44 +462,60 @@ static void drawEyeRegion(const uint8_t* eyeData, const uint16_t* palette) {
   }
 }
 
-// フレーム描画: blinkState 0=目開き, 1=半目, 2=閉じ
-static void drawFrame(uint8_t seqIdx) {
-  uint8_t blinkState = blinkSequence[seqIdx];
+// ベース画像の目領域を復元
+static void restoreBaseEyeRegion(uint8_t orient) {
+  uint8_t x, y, w, h;
+  getEyeImageRect(orient, x, y, w, h);
+  drawBaseFrameRegion(orient, x, y, w, h);
+}
 
-  if (lastDrawnFrame < 0) {
-    // 初回: ベース全体を描画
-    drawBaseFrame();
-  }
-
-  // 目の状態に応じてオーバーレイ
-  if (blinkState == 0) {
-    // 目開き: ベースの目領域を復元
-    uint16_t startX = (TFT_W - IMG_W) / 2;
-    uint16_t startY = (TFT_H - IMG_H) / 2;
-    for (uint8_t ey = 0; ey < EYE_H; ey++) {
-      uint16_t screenY = startY + EYE_Y + ey;
-      uint16_t screenX = startX + EYE_X;
-      tftSetAddrWindow(screenX, screenY, screenX + EYE_W - 1, screenY);
+// 余白を白で塗りつぶす
+static void clearMargins(uint8_t orient) {
+  uint16_t imgX = getStartX(orient);
+  uint16_t rightX = imgX + IMG_W;
+  for (uint8_t y = 0; y < TFT_H; y++) {
+    // 左余白
+    if (imgX > 0) {
+      tftSetAddrWindow(0, y, imgX - 1, y);
       dcData();
       digitalWrite(TFT_CS, LOW);
-      for (uint8_t ex = 0; ex < EYE_W; ex++) {
-        uint8_t idx = pgm_read_byte(&baseFrame[(uint16_t)(EYE_Y + ey) * IMG_W + (EYE_X + ex)]);
-        uint16_t color = pgm_read_word(&basePalette[idx]);
-#if defined(USE_SSD1351) || defined(USE_SSD1331)
-        SPI.transfer(color >> 8);
-        SPI.transfer(color & 0xFF);
-#else
-        SPI.transfer((color >> 8) & 0xF8);
-        SPI.transfer((color >> 3) & 0xFC);
-        SPI.transfer((color << 3) & 0xF8);
-#endif
+      for (uint8_t x = 0; x < imgX; x++) {
+        SPI.transfer(0xFF); SPI.transfer(0xFF);
       }
       digitalWrite(TFT_CS, HIGH);
     }
+    // 右余白
+    if (rightX < TFT_W) {
+      tftSetAddrWindow(rightX, y, TFT_W - 1, y);
+      dcData();
+      digitalWrite(TFT_CS, LOW);
+      for (uint8_t x = rightX; x < TFT_W; x++) {
+        SPI.transfer(0xFF); SPI.transfer(0xFF);
+      }
+      digitalWrite(TFT_CS, HIGH);
+    }
+  }
+}
+
+// フレーム描画: blinkState 0=目開き, 1=半目, 2=閉じ
+static void drawFrame(uint8_t seqIdx, uint8_t orient) {
+  uint8_t blinkState = blinkSequence[seqIdx];
+
+  if (lastDrawnFrame < 0 || orient != currentOrient) {
+    clearMargins(orient);
+    drawBaseFrame(orient);
+    currentOrient = orient;
+  }
+
+  // TODO: これがないと青い線が出る。原因未解明
+  clearMargins(orient);
+
+  if (blinkState == 0) {
+    restoreBaseEyeRegion(orient);
   } else if (blinkState == 1) {
-    drawEyeRegion(eyeHalf, eyeHalfPalette);
+    drawEyeRegion(orient, eyeHalf, eyeHalfPalette);
   } else {
-    drawEyeRegion(eyeClosed, eyeClosedPalette);
+    drawEyeRegion(orient, eyeClosed, eyeClosedPalette);
   }
 
   lastDrawnFrame = seqIdx;
@@ -662,11 +699,31 @@ static uint8_t currentFrame = 0;
 static uint32_t lastFrameTime = 0;
 static const uint32_t FRAME_INTERVAL_MS = 200;  // 200ms per frame
 
+// 加速度センサーから傾き方向を検出
+static uint8_t detectOrientation() {
+  int16_t rx, ry, rz;
+  if (!calibrated || !readXYZ_raw(rx, ry, rz)) return currentOrient;
+
+  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
+  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
+
+  const int16_t threshold = 5000;
+
+  // X方向優先
+  if (dx > threshold) return 2;       // 右傾き → 90°CCW
+  if (dx < -threshold) return 1;      // 左傾き → 90°CW
+
+  // Y方向
+  if (dy < -threshold) return 3;      // 上傾き → 180°
+
+  return 0;  // 下傾きまたは水平 → 通常
+}
+
 void setup() {
   tftInit();
-  drawFrame(0);
+  tftFillScreen888(255, 255, 255);
 
-  // 加速度センサー初期化 (スリープ用)
+  // 加速度センサー初期化
   Wire.setSDA(PB_7);
   Wire.setSCL(PB_6);
   Wire.begin();
@@ -674,18 +731,22 @@ void setup() {
 
   write8(REG_CTRL1, 0x00); delay(10);
   write8(REG_DATA_CTRL, 0x02); delay(10);
+  write8(REG_CTRL1, 0xC0); delay(50);  // 動作モード (12bit, 50Hz)
+
+  calibrateKXTJ3(20);
   enableWakeupInterrupt();
 
   attachInterrupt(digitalPinToInterrupt(KXTJ3_INT_PIN), wakeupCallback, FALLING);
 
+  drawFrame(0, detectOrientation());
   lastActivityMs = millis();
 }
 
 void loop() {
-  // スリープ/ディム制御
   uint32_t now = millis();
   uint32_t elapsed = now - lastActivityMs;
 
+  // スリープ
   if (elapsed >= SLEEP_TIMEOUT_MS) {
     backlightOff();
     clearLatchedInterrupt();
@@ -694,21 +755,28 @@ void loop() {
     HAL_ResumeTick();
     backlightFull();
     lastActivityMs = millis();
-    lastFrameTime = millis();  // アニメーション再開用
+    lastFrameTime = millis();
+    lastDrawnFrame = -1;  // 再描画
     return;
   }
 
+  // ディム
   if (elapsed >= DIM_TIMEOUT_MS) {
     backlightDim();
   } else {
     backlightFull();
   }
 
-  // アニメーション (2フレーム切り替え)
+  // 傾き検出と描画
+  uint8_t orient = detectOrientation();
+  if (orient != currentOrient) {
+    lastActivityMs = now;
+  }
+
   if (now - lastFrameTime >= FRAME_INTERVAL_MS) {
     lastFrameTime = now;
     currentFrame = (currentFrame + 1) % IMG_FRAMES;
-    drawFrame(currentFrame);
+    drawFrame(currentFrame, orient);
   }
 
   /* ボールデモ用 (未使用)
