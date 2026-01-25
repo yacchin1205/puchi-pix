@@ -748,7 +748,10 @@ void loop() {
 
   // スリープ
   if (elapsed >= SLEEP_TIMEOUT_MS) {
+    // TODO: Display OFFが効かない場合がある。再現性なし、原因未解明。念のためdelayを追加したが効果なし
+    delay(10);
     backlightOff();
+    delay(10);
     clearLatchedInterrupt();
     HAL_SuspendTick();
     HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
