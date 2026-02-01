@@ -11,13 +11,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(SCRIPT_DIR, '..', 'image_data.h')
 
 # Source images
-BASE_IMG = os.path.join(SCRIPT_DIR, 'IMG_1508.PNG')
-HALF_IMG = os.path.join(SCRIPT_DIR, 'gemini2_64.png')    # half-closed eyes
-CLOSED_IMG = os.path.join(SCRIPT_DIR, 'gemini1_64.png')  # fully closed eyes
+BASE_IMG = os.path.join(SCRIPT_DIR, 'new_base.png')
+HALF_IMG = os.path.join(SCRIPT_DIR, 'new_half.png')      # half-closed eyes
+CLOSED_IMG = os.path.join(SCRIPT_DIR, 'new_closed.png')  # fully closed eyes
 
 # Eye region coordinates (excluding mouth)
-EYE_X, EYE_Y = 17, 29
-EYE_W, EYE_H = 29, 18
+EYE_X, EYE_Y = 19, 34
+EYE_W, EYE_H = 26, 11
 
 
 def rgb_to_rgb565(r, g, b):
