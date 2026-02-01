@@ -529,6 +529,7 @@ static void oledDisplayOn() {
 
 static void oledDisplayOff() {
   tftWriteCommandData(0xAE, nullptr, 0);
+  delay(10);  // Wait for SPI completion
 }
 
 static void oledSetContrast(uint8_t level) {
@@ -573,17 +574,21 @@ static void tftInit() {
 }
 #elif defined(USE_SSD1331)
 static void oledDisplayOn() {
-  tftWriteCommandData(0xAF, nullptr, 0);
+  tftWriteCommand(0xAF);                          // Display ON
+  tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current = 6 (restore)
 }
 
 static void oledDisplayOff() {
-  tftWriteCommandData(0xAE, nullptr, 0);
+  tftWriteCommand(0x87); tftWriteCommand(0x00);  // Master current = 0
+  tftWriteCommand(0xAE);                          // Display OFF
+  delay(10);
 }
 
 static void oledSetContrast(uint8_t level) {
   // SSD1331: Master Current Control (0x87), 0-15
-  uint8_t d[] = { (uint8_t)(level & 0x0F) };
-  tftWriteCommandData(0x87, d, 1);
+  // Note: SSD1331 requires all bytes sent with D/C=LOW
+  tftWriteCommand(0x87);
+  tftWriteCommand(level & 0x0F);
 }
 
 static void tftInit() {
@@ -748,12 +753,10 @@ void loop() {
 
   // スリープ
   if (elapsed >= SLEEP_TIMEOUT_MS) {
-    // TODO: Display OFFが効かない場合がある。再現性なし、原因未解明。念のためdelayを追加したが効果なし
-    delay(10);
-    backlightOff();
-    delay(10);
+    backlightOff();          // Display OFF + Power Save ON
     clearLatchedInterrupt();
     HAL_SuspendTick();
+    __DSB();                 // Data Synchronization Barrier (ARM requirement before WFI)
     HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
     HAL_ResumeTick();
     backlightFull();
