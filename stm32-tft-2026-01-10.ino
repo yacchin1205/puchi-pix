@@ -521,6 +521,52 @@ static void drawFrame(uint8_t seqIdx, uint8_t orient) {
   lastDrawnFrame = seqIdx;
 }
 
+static uint8_t currentFrame = 0;
+
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+// 全コントラスト設定 (SSD1331用)
+static void oledSetAllContrast(uint8_t a, uint8_t b, uint8_t c, uint8_t master) {
+  tftWriteCommand(0x81); tftWriteCommand(a);       // Contrast A
+  tftWriteCommand(0x82); tftWriteCommand(b);       // Contrast B
+  tftWriteCommand(0x83); tftWriteCommand(c);       // Contrast C
+  tftWriteCommand(0x87); tftWriteCommand(master);  // Master current
+}
+
+// フェードトランジション (向き変更時)
+static void fadeTransition(uint8_t newOrient) {
+  // 初期値: A=0x91, B=0x50, C=0x7D, Master=0x06
+  const uint8_t steps = 8;
+
+  // フェードアウト
+  for (int i = steps; i >= 0; i--) {
+    uint8_t a = (0x91 * i) / steps;
+    uint8_t b = (0x50 * i) / steps;
+    uint8_t c = (0x7D * i) / steps;
+    uint8_t m = (0x06 * i) / steps;
+    oledSetAllContrast(a, b, c, m);
+    delay(25);
+  }
+
+  // 完全消灯
+  tftWriteCommand(0xAE);  // Display OFF
+  delay(50);
+
+  // 新しい向きで描画
+  drawFrame(currentFrame, newOrient);
+
+  // Display ON して フェードイン
+  tftWriteCommand(0xAF);  // Display ON
+  for (int i = 0; i <= steps; i++) {
+    uint8_t a = (0x91 * i) / steps;
+    uint8_t b = (0x50 * i) / steps;
+    uint8_t c = (0x7D * i) / steps;
+    uint8_t m = (0x06 * i) / steps;
+    oledSetAllContrast(a, b, c, m);
+    delay(25);
+  }
+}
+#endif
+
 // ---------- Display Init ----------
 #if defined(USE_SSD1351)
 static void oledDisplayOn() {
@@ -700,7 +746,6 @@ static void calibrateKXTJ3(uint8_t samples=80) {
   calibrated = 1;
 }
 
-static uint8_t currentFrame = 0;
 static uint32_t lastFrameTime = 0;
 static const uint32_t FRAME_INTERVAL_MS = 200;  // 200ms per frame
 
@@ -777,6 +822,14 @@ void loop() {
   uint8_t orient = detectOrientation();
   if (orient != currentOrient) {
     lastActivityMs = now;
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+    // Dim状態でなければフェードトランジション
+    if (elapsed < DIM_TIMEOUT_MS) {
+      fadeTransition(orient);
+      lastFrameTime = now;
+      return;
+    }
+#endif
   }
 
   if (now - lastFrameTime >= FRAME_INTERVAL_MS) {
