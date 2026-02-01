@@ -769,6 +769,93 @@ static uint8_t detectOrientation() {
   return 0;  // 下傾きまたは水平 → 通常
 }
 
+// 「上」方向インジケーター (4ピクセルの赤い点、傾きで位置が変わる)
+static int16_t prevIndX = -1, prevIndY = -1;
+
+// 指定位置の元画像ピクセルを復元
+static void restorePixel(int16_t sx, int16_t sy) {
+  if (sx < 0 || sx >= TFT_W || sy < 0 || sy >= TFT_H) return;
+
+  uint16_t imgX = getStartX(currentOrient);
+  uint16_t color;
+
+  // 画像領域内かチェック
+  if (sx >= imgX && sx < imgX + IMG_W && sy < IMG_H) {
+    uint8_t localX = sx - imgX;
+    uint8_t localY = sy;
+    uint16_t srcIdx = getSrcIndex(localX, localY, currentOrient, IMG_W, IMG_H);
+    uint8_t palIdx = pgm_read_byte(&baseFrame[srcIdx]);
+    color = pgm_read_word(&basePalette[palIdx]);
+  } else {
+    color = 0xFFFF;  // 白 (余白)
+  }
+
+  tftSetAddrWindow(sx, sy, sx, sy);
+  dcData();
+  digitalWrite(TFT_CS, LOW);
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+  SPI.transfer(color >> 8);
+  SPI.transfer(color & 0xFF);
+#else
+  SPI.transfer((color >> 8) & 0xF8);
+  SPI.transfer((color >> 3) & 0xFC);
+  SPI.transfer((color << 3) & 0xF8);
+#endif
+  digitalWrite(TFT_CS, HIGH);
+}
+
+static void drawUpIndicator() {
+  int16_t rx, ry, rz;
+  if (!calibrated || !readXYZ_raw(rx, ry, rz)) return;
+
+  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
+  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
+
+  // 傾きを直接位置にマッピング (水準器の泡)
+  const int16_t maxTilt = 8000;
+  int16_t posX = TFT_W / 2 - (dx * (TFT_W / 2 - 4)) / maxTilt;
+  int16_t posY = TFT_H / 2 - (dy * (TFT_H / 2 - 4)) / maxTilt;
+
+  // 画面内にクランプ
+  if (posX < 2) posX = 2;
+  if (posX > TFT_W - 4) posX = TFT_W - 4;
+  if (posY < 2) posY = 2;
+  if (posY > TFT_H - 4) posY = TFT_H - 4;
+
+  // 前の位置を復元 (2x2)
+  if (prevIndX >= 0 && (prevIndX != posX || prevIndY != posY)) {
+    for (int dy = 0; dy < 2; dy++) {
+      for (int dx = 0; dx < 2; dx++) {
+        restorePixel(prevIndX + dx, prevIndY + dy);
+      }
+    }
+  }
+
+  // 赤色 (RGB565: 0xF800)
+  const uint16_t red = 0xF800;
+  uint8_t hi = red >> 8, lo = red & 0xFF;
+
+  // 4ピクセル描画 (2x2)
+  tftSetAddrWindow(posX, posY, posX + 1, posY + 1);
+  dcData();
+  digitalWrite(TFT_CS, LOW);
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+  for (int i = 0; i < 4; i++) {
+    SPI.transfer(hi); SPI.transfer(lo);
+  }
+#else
+  for (int i = 0; i < 4; i++) {
+    SPI.transfer((red >> 8) & 0xF8);
+    SPI.transfer((red >> 3) & 0xFC);
+    SPI.transfer((red << 3) & 0xF8);
+  }
+#endif
+  digitalWrite(TFT_CS, HIGH);
+
+  prevIndX = posX;
+  prevIndY = posY;
+}
+
 void setup() {
   tftInit();
   tftFillScreen888(255, 255, 255);
@@ -837,6 +924,9 @@ void loop() {
     currentFrame = (currentFrame + 1) % IMG_FRAMES;
     drawFrame(currentFrame, orient);
   }
+
+  // 上方向インジケーター
+  drawUpIndicator();
 
   /* ボールデモ用 (未使用)
   uint32_t elapsed = millis() - lastActivityMs;
