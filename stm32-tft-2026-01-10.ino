@@ -749,7 +749,7 @@ static void calibrateKXTJ3(uint8_t samples=80) {
 static uint32_t lastFrameTime = 0;
 static const uint32_t FRAME_INTERVAL_MS = 200;  // 200ms per frame
 
-// 加速度センサーから傾き方向を検出
+// 加速度センサーから傾き方向を検出 (ヒステリシス付き)
 static uint8_t detectOrientation() {
   int16_t rx, ry, rz;
   if (!calibrated || !readXYZ_raw(rx, ry, rz)) return currentOrient;
@@ -757,16 +757,46 @@ static uint8_t detectOrientation() {
   int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
   int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
 
-  const int16_t threshold = 5000;
+  const int16_t thresholdIn = 5000;   // 入る閾値
+  const int16_t thresholdOut = 3000;  // 出る閾値
 
-  // X方向優先
-  if (dx > threshold) return 2;       // 右傾き → 90°CCW
-  if (dx < -threshold) return 1;      // 左傾き → 90°CW
+  int16_t absDx = dx > 0 ? dx : -dx;
+  int16_t absDy = dy > 0 ? dy : -dy;
+  int16_t maxTilt = absDx > absDy ? absDx : absDy;
 
-  // Y方向
-  if (dy < -threshold) return 3;      // 上傾き → 180°
+  // 現在の向きを維持するか判定
+  if (maxTilt > thresholdOut) {
+    switch (currentOrient) {
+      case 1:  // 左傾き: dx が支配的で負
+        if (absDx > absDy && dx < 0) return 1;
+        break;
+      case 2:  // 右傾き: dx が支配的で正
+        if (absDx > absDy && dx > 0) return 2;
+        break;
+      case 3:  // 上傾き: dy が支配的で負
+        if (absDy > absDx && dy < 0) return 3;
+        break;
+      case 0:  // 下/水平: dy が支配的で正、または傾き小
+        if (absDy > absDx && dy > 0) return 0;
+        break;
+    }
+  } else {
+    // 傾きが小さい場合は現在の向きを維持
+    return currentOrient;
+  }
 
-  return 0;  // 下傾きまたは水平 → 通常
+  // 新しい向きへの切り替え判定
+  if (maxTilt > thresholdIn) {
+    if (absDx > absDy) {
+      // X方向が支配的
+      return (dx > 0) ? 2 : 1;  // 右 or 左
+    } else {
+      // Y方向が支配的
+      return (dy < 0) ? 3 : 0;  // 上 or 下
+    }
+  }
+
+  return currentOrient;
 }
 
 // 「上」方向インジケーター (4ピクセルの赤い点、傾きで位置が変わる)
