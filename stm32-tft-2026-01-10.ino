@@ -682,7 +682,7 @@ static void tftInit() {
   SPI.setMOSI(PA_7);
   SPI.setMISO(PA_6);
   SPI.begin();
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
 
   oledInitRegisters();
   tftFillScreen888(0, 0, 0);  // Clear to black
