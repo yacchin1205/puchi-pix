@@ -35,9 +35,9 @@ static constexpr int TFT_W = 96;
 static constexpr int TFT_H = 64;
 static constexpr uint8_t X_OFFSET = 0;
 static constexpr uint8_t Y_OFFSET = 0;
-// 加速度センサー座標反転 (SSD1331用 - 要調整)
-static constexpr int ACCEL_X_SIGN = -1;
-static constexpr int ACCEL_Y_SIGN = -1;
+// 加速度センサー座標反転 (SSD1331用)
+static constexpr int ACCEL_X_SIGN = 1;
+static constexpr int ACCEL_Y_SIGN = 1;
 #else
 // ST7735 TFT 128x160
 static constexpr int TFT_W = 128;
