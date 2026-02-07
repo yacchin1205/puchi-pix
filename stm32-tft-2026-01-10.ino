@@ -18,6 +18,7 @@
 // =====================
 static constexpr uint8_t TFT_CS = PA_0;
 static constexpr uint8_t TFT_DC = PA_1;
+static constexpr uint8_t TFT_RST = PA_2;
 
 #if defined(USE_SSD1351)
 // SSD1351 OLED 128x128
@@ -547,15 +548,12 @@ static void fadeTransition(uint8_t newOrient) {
     delay(25);
   }
 
-  // 完全消灯
-  tftWriteCommand(0xAE);  // Display OFF
-  delay(50);
+  // リセット+再初期化
+  oledHardReset();
+  oledInitRegisters();
 
   // 新しい向きで描画
   drawFrame(currentFrame, newOrient);
-
-  // Display ON して フェードイン
-  tftWriteCommand(0xAF);  // Display ON
   for (int i = 0; i <= steps; i++) {
     uint8_t a = (0x91 * i) / steps;
     uint8_t b = (0x50 * i) / steps;
@@ -637,19 +635,14 @@ static void oledSetContrast(uint8_t level) {
   tftWriteCommand(level & 0x0F);
 }
 
-static void tftInit() {
-  pinMode(TFT_CS, OUTPUT);
-  pinMode(TFT_DC, OUTPUT);
-  digitalWrite(TFT_CS, HIGH);
-  digitalWrite(TFT_DC, HIGH);
+static void oledHardReset() {
+  digitalWrite(TFT_RST, LOW);
+  delay(10);
+  digitalWrite(TFT_RST, HIGH);
+  delay(10);
+}
 
-  SPI.setSCLK(PA_5);
-  SPI.setMOSI(PA_7);
-  SPI.setMISO(PA_6);
-  SPI.begin();
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-
-  // SSD1331 init: all bytes sent with D/C=LOW (like Adafruit)
+static void oledInitRegisters() {
   tftWriteCommand(0xAE);  // Display OFF
   delay(100);
   tftWriteCommand(0xA0); tftWriteCommand(0x72);  // Remap: 65k, RGB, scan/column remap
@@ -672,7 +665,26 @@ static void tftInit() {
   tftWriteCommand(0x83); tftWriteCommand(0x7D);  // Contrast C
   tftWriteCommand(0xAF);  // Display ON
   delay(100);
+}
 
+static void tftInit() {
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_DC, HIGH);
+
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_RST, HIGH);
+  delay(10);
+  oledHardReset();
+
+  SPI.setSCLK(PA_5);
+  SPI.setMOSI(PA_7);
+  SPI.setMISO(PA_6);
+  SPI.begin();
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+
+  oledInitRegisters();
   tftFillScreen888(0, 0, 0);  // Clear to black
 }
 #else  // ST7735
