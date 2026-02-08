@@ -470,7 +470,7 @@ static void restoreBaseEyeRegion(uint8_t orient) {
   drawBaseFrameRegion(orient, x, y, w, h);
 }
 
-// 余白を白で塗りつぶす
+// 余白を黒で塗りつぶす
 static void clearMargins(uint8_t orient) {
   uint16_t imgX = getStartX(orient);
   uint16_t rightX = imgX + IMG_W;
@@ -481,7 +481,7 @@ static void clearMargins(uint8_t orient) {
       dcData();
       digitalWrite(TFT_CS, LOW);
       for (uint8_t x = 0; x < imgX; x++) {
-        SPI.transfer(0xFF); SPI.transfer(0xFF);
+        SPI.transfer(0x00); SPI.transfer(0x00);
       }
       digitalWrite(TFT_CS, HIGH);
     }
@@ -491,7 +491,7 @@ static void clearMargins(uint8_t orient) {
       dcData();
       digitalWrite(TFT_CS, LOW);
       for (uint8_t x = rightX; x < TFT_W; x++) {
-        SPI.transfer(0xFF); SPI.transfer(0xFF);
+        SPI.transfer(0x00); SPI.transfer(0x00);
       }
       digitalWrite(TFT_CS, HIGH);
     }
@@ -535,15 +535,14 @@ static void oledSetAllContrast(uint8_t a, uint8_t b, uint8_t c, uint8_t master) 
 
 // フェードトランジション (向き変更時)
 static void fadeTransition(uint8_t newOrient) {
-  // 初期値: A=0x91, B=0x50, C=0x7D, Master=0x06
   const uint8_t steps = 8;
 
   // フェードアウト
   for (int i = steps; i >= 0; i--) {
-    uint8_t a = (0x91 * i) / steps;
-    uint8_t b = (0x50 * i) / steps;
-    uint8_t c = (0x7D * i) / steps;
-    uint8_t m = (0x06 * i) / steps;
+    uint8_t a = (0xFF * i) / steps;
+    uint8_t b = (0x8D * i) / steps;
+    uint8_t c = (0xDC * i) / steps;
+    uint8_t m = (0x0F * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
@@ -555,10 +554,10 @@ static void fadeTransition(uint8_t newOrient) {
   // 新しい向きで描画
   drawFrame(currentFrame, newOrient);
   for (int i = 0; i <= steps; i++) {
-    uint8_t a = (0x91 * i) / steps;
-    uint8_t b = (0x50 * i) / steps;
-    uint8_t c = (0x7D * i) / steps;
-    uint8_t m = (0x06 * i) / steps;
+    uint8_t a = (0xFF * i) / steps;
+    uint8_t b = (0x8D * i) / steps;
+    uint8_t c = (0xDC * i) / steps;
+    uint8_t m = (0x0F * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
@@ -653,16 +652,16 @@ static void oledInitRegisters() {
   tftWriteCommand(0xAD); tftWriteCommand(0x8E);  // Master config
   tftWriteCommand(0xB0); tftWriteCommand(0x0B);  // Power save OFF
   tftWriteCommand(0xB1); tftWriteCommand(0x31);  // Phase period adj
-  tftWriteCommand(0xB3); tftWriteCommand(0xF0);  // Clock divider
+  tftWriteCommand(0xB3); tftWriteCommand(0xC0);  // Clock divider
   tftWriteCommand(0x8A); tftWriteCommand(0x64);  // Precharge A
   tftWriteCommand(0x8B); tftWriteCommand(0x78);  // Precharge B
   tftWriteCommand(0x8C); tftWriteCommand(0x64);  // Precharge C
   tftWriteCommand(0xBB); tftWriteCommand(0x3A);  // Precharge level
   tftWriteCommand(0xBE); tftWriteCommand(0x3E);  // VCOMH
   tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current
-  tftWriteCommand(0x81); tftWriteCommand(0x91);  // Contrast A
-  tftWriteCommand(0x82); tftWriteCommand(0x50);  // Contrast B
-  tftWriteCommand(0x83); tftWriteCommand(0x7D);  // Contrast C
+  tftWriteCommand(0x81); tftWriteCommand(0xFF);  // Contrast A
+  tftWriteCommand(0x82); tftWriteCommand(0x8D);  // Contrast B
+  tftWriteCommand(0x83); tftWriteCommand(0xDC);  // Contrast C
   tftWriteCommand(0xAF);  // Display ON
   delay(100);
 }
@@ -829,7 +828,7 @@ static void restorePixel(int16_t sx, int16_t sy) {
     uint8_t palIdx = pgm_read_byte(&baseFrame[srcIdx]);
     color = pgm_read_word(&basePalette[palIdx]);
   } else {
-    color = 0xFFFF;  // 白 (余白)
+    color = 0x0000;  // 黒 (余白)
   }
 
   tftSetAddrWindow(sx, sy, sx, sy);
