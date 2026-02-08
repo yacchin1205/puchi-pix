@@ -100,8 +100,8 @@ static void oledDisplayOn();
 static void oledDisplayOff();
 static void oledSetContrast(uint8_t level);
 
-static inline void backlightFull() { oledDisplayOn(); oledSetContrast(0x0F); }
-static inline void backlightDim()  { oledSetContrast(0x05); }
+static inline void backlightFull() { oledDisplayOn(); oledSetContrast(0x06); }
+static inline void backlightDim()  { oledSetContrast(0x01); }
 static inline void backlightOff()  { oledDisplayOff(); }
 #else
 // TFT用: PWMバックライト
@@ -539,25 +539,26 @@ static void fadeTransition(uint8_t newOrient) {
 
   // フェードアウト
   for (int i = steps; i >= 0; i--) {
-    uint8_t a = (0xFF * i) / steps;
-    uint8_t b = (0x8D * i) / steps;
-    uint8_t c = (0xDC * i) / steps;
-    uint8_t m = (0x0F * i) / steps;
+    uint8_t a = (0x91 * i) / steps;
+    uint8_t b = (0x50 * i) / steps;
+    uint8_t c = (0x7D * i) / steps;
+    uint8_t m = (0x06 * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
 
-  // リセット+再初期化
+  // リセット+再初期化 (暗い状態で)
   oledHardReset();
   oledInitRegisters();
+  oledSetAllContrast(0, 0, 0, 0);
 
   // 新しい向きで描画
   drawFrame(currentFrame, newOrient);
   for (int i = 0; i <= steps; i++) {
-    uint8_t a = (0xFF * i) / steps;
-    uint8_t b = (0x8D * i) / steps;
-    uint8_t c = (0xDC * i) / steps;
-    uint8_t m = (0x0F * i) / steps;
+    uint8_t a = (0x91 * i) / steps;
+    uint8_t b = (0x50 * i) / steps;
+    uint8_t c = (0x7D * i) / steps;
+    uint8_t m = (0x06 * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
@@ -659,9 +660,9 @@ static void oledInitRegisters() {
   tftWriteCommand(0xBB); tftWriteCommand(0x3A);  // Precharge level
   tftWriteCommand(0xBE); tftWriteCommand(0x3E);  // VCOMH
   tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current
-  tftWriteCommand(0x81); tftWriteCommand(0xFF);  // Contrast A
-  tftWriteCommand(0x82); tftWriteCommand(0x8D);  // Contrast B
-  tftWriteCommand(0x83); tftWriteCommand(0xDC);  // Contrast C
+  tftWriteCommand(0x81); tftWriteCommand(0x91);  // Contrast A
+  tftWriteCommand(0x82); tftWriteCommand(0x50);  // Contrast B
+  tftWriteCommand(0x83); tftWriteCommand(0x7D);  // Contrast C
   tftWriteCommand(0xAF);  // Display ON
   delay(100);
 }
