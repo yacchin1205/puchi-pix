@@ -36,8 +36,8 @@ static constexpr int TFT_H = 64;
 static constexpr uint8_t X_OFFSET = 0;
 static constexpr uint8_t Y_OFFSET = 0;
 // 加速度センサー座標反転 (SSD1331用)
-static constexpr int ACCEL_X_SIGN = 1;
-static constexpr int ACCEL_Y_SIGN = 1;
+static constexpr int ACCEL_X_SIGN = -1;
+static constexpr int ACCEL_Y_SIGN = -1;
 #else
 // ST7735 TFT 128x160
 static constexpr int TFT_W = 128;
@@ -71,7 +71,7 @@ static const uint8_t REG_WUTH_L     = 0x6B;
 static constexpr uint32_t KXTJ3_INT_PIN = PA_4;
 
 // =====================
-// 画像データ (64x64, blink animation with eye region overlay)
+// 画像データ (64x64, entrance + blink animation)
 // =====================
 #include "image_data.h"
 static const uint8_t IMG_SCALE = 1;
@@ -79,6 +79,14 @@ static const uint8_t IMG_FRAMES = 5;  // blink sequence: 0->1->2->1->0
 
 // Blink sequence: base -> half -> closed -> half -> base
 static const uint8_t blinkSequence[5] = { 0, 1, 2, 1, 0 };
+
+// Entrance animation state
+static bool entranceDone = false;
+static uint8_t entranceStep = 0;  // 0,1 = entrance frames, 2 = base (done)
+static uint8_t entranceOrient = 0; // 登場アニメの向き
+
+// Entrance frame data tables (4-bit packed, indexed by entranceStep)
+static const uint8_t* const entranceFrames[2] PROGMEM = { entranceFrame0, entranceFrame1 };
 
 // ---------- KXTJ3 low-level ----------
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -395,7 +403,25 @@ static inline uint16_t getSrcIndex(uint8_t x, uint8_t y, uint8_t orient, uint8_t
   return (uint16_t)srcY * w + srcX;
 }
 
-// ベースフレームの指定領域を描画
+// 4-bit packed array から palette index を読み出す
+static inline uint8_t read4bit(const uint8_t* data, uint16_t pixelIdx) {
+  uint8_t b = pgm_read_byte(&data[pixelIdx >> 1]);
+  return (pixelIdx & 1) ? (b & 0x0F) : (b >> 4);
+}
+
+// palette index から色を転送
+static inline void transferColor(uint16_t color) {
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+  SPI.transfer(color >> 8);
+  SPI.transfer(color & 0xFF);
+#else
+  SPI.transfer((color >> 8) & 0xF8);
+  SPI.transfer((color >> 3) & 0xFC);
+  SPI.transfer((color << 3) & 0xF8);
+#endif
+}
+
+// ベースフレームの指定領域を描画 (4-bit packed)
 static void drawBaseFrameRegion(uint8_t orient, uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
   uint16_t screenX = getStartX(orient) + x;
   uint16_t screenY = y;
@@ -405,16 +431,9 @@ static void drawBaseFrameRegion(uint8_t orient, uint8_t x, uint8_t y, uint8_t w,
     dcData();
     digitalWrite(TFT_CS, LOW);
     for (uint8_t dx = 0; dx < w; dx++) {
-      uint8_t idx = pgm_read_byte(&baseFrame[getSrcIndex(x + dx, y + dy, orient, IMG_W, IMG_H)]);
-      uint16_t color = pgm_read_word(&basePalette[idx]);
-#if defined(USE_SSD1351) || defined(USE_SSD1331)
-      SPI.transfer(color >> 8);
-      SPI.transfer(color & 0xFF);
-#else
-      SPI.transfer((color >> 8) & 0xF8);
-      SPI.transfer((color >> 3) & 0xFC);
-      SPI.transfer((color << 3) & 0xF8);
-#endif
+      uint16_t srcIdx = getSrcIndex(x + dx, y + dy, orient, IMG_W, IMG_H);
+      uint8_t idx = read4bit(baseFrame, srcIdx);
+      transferColor(pgm_read_word(&palette[idx]));
     }
     digitalWrite(TFT_CS, HIGH);
   }
@@ -423,6 +442,24 @@ static void drawBaseFrameRegion(uint8_t orient, uint8_t x, uint8_t y, uint8_t w,
 // ベースフレーム全体を描画
 static void drawBaseFrame(uint8_t orient) {
   drawBaseFrameRegion(orient, 0, 0, IMG_W, IMG_H);
+}
+
+// 登場フレーム描画 - 4-bit packed, 回転対応
+static void drawEntranceFrame(uint8_t frameIdx, uint8_t orient) {
+  const uint8_t* frameData = (const uint8_t*)pgm_read_ptr(&entranceFrames[frameIdx]);
+  uint16_t screenX = getStartX(orient);
+
+  for (uint8_t dy = 0; dy < IMG_H; dy++) {
+    tftSetAddrWindow(screenX, dy, screenX + IMG_W - 1, dy);
+    dcData();
+    digitalWrite(TFT_CS, LOW);
+    for (uint8_t dx = 0; dx < IMG_W; dx++) {
+      uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
+      uint8_t idx = read4bit(frameData, srcIdx);
+      transferColor(pgm_read_word(&palette[idx]));
+    }
+    digitalWrite(TFT_CS, HIGH);
+  }
 }
 
 // 目領域の描画先座標とサイズを取得
@@ -436,8 +473,8 @@ static void getEyeImageRect(uint8_t orient, uint8_t& x, uint8_t& y, uint8_t& w, 
 }
 
 
-// 目領域のみ描画
-static void drawEyeRegion(uint8_t orient, const uint8_t* eyeData, const uint16_t* palette) {
+// 目領域のみ描画 (4-bit packed, 共有palette)
+static void drawEyeRegion(uint8_t orient, const uint8_t* eyeData) {
   uint8_t x, y, w, h;
   getEyeImageRect(orient, x, y, w, h);
   uint16_t screenX = getStartX(orient) + x;
@@ -448,16 +485,9 @@ static void drawEyeRegion(uint8_t orient, const uint8_t* eyeData, const uint16_t
     dcData();
     digitalWrite(TFT_CS, LOW);
     for (uint8_t dx = 0; dx < w; dx++) {
-      uint8_t idx = pgm_read_byte(&eyeData[getSrcIndex(dx, dy, orient, EYE_W, EYE_H)]);
-      uint16_t color = pgm_read_word(&palette[idx]);
-#if defined(USE_SSD1351) || defined(USE_SSD1331)
-      SPI.transfer(color >> 8);
-      SPI.transfer(color & 0xFF);
-#else
-      SPI.transfer((color >> 8) & 0xF8);
-      SPI.transfer((color >> 3) & 0xFC);
-      SPI.transfer((color << 3) & 0xF8);
-#endif
+      uint16_t srcIdx = getSrcIndex(dx, dy, orient, EYE_W, EYE_H);
+      uint8_t idx = read4bit(eyeData, srcIdx);
+      transferColor(pgm_read_word(&palette[idx]));
     }
     digitalWrite(TFT_CS, HIGH);
   }
@@ -514,9 +544,9 @@ static void drawFrame(uint8_t seqIdx, uint8_t orient) {
   if (blinkState == 0) {
     restoreBaseEyeRegion(orient);
   } else if (blinkState == 1) {
-    drawEyeRegion(orient, eyeHalf, eyeHalfPalette);
+    drawEyeRegion(orient, eyeHalf);
   } else {
-    drawEyeRegion(orient, eyeClosed, eyeClosedPalette);
+    drawEyeRegion(orient, eyeClosed);
   }
 
   lastDrawnFrame = seqIdx;
@@ -552,8 +582,14 @@ static void fadeTransition(uint8_t newOrient) {
   oledInitRegisters();
   oledSetAllContrast(0, 0, 0, 0);
 
-  // 新しい向きで描画
-  drawFrame(currentFrame, newOrient);
+  // 登場アニメをリセット (新しい向きで再生)
+  currentOrient = newOrient;
+  entranceDone = false;
+  entranceStep = 0;
+  entranceOrient = newOrient;
+  tftFillScreen888(0, 0, 0);
+
+  // フェードイン
   for (int i = 0; i <= steps; i++) {
     uint8_t a = (0x91 * i) / steps;
     uint8_t b = (0x50 * i) / steps;
@@ -826,8 +862,8 @@ static void restorePixel(int16_t sx, int16_t sy) {
     uint8_t localX = sx - imgX;
     uint8_t localY = sy;
     uint16_t srcIdx = getSrcIndex(localX, localY, currentOrient, IMG_W, IMG_H);
-    uint8_t palIdx = pgm_read_byte(&baseFrame[srcIdx]);
-    color = pgm_read_word(&basePalette[palIdx]);
+    uint8_t palIdx = read4bit(baseFrame, srcIdx);
+    color = pgm_read_word(&palette[palIdx]);
   } else {
     color = 0x0000;  // 黒 (余白)
   }
@@ -935,7 +971,11 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(KXTJ3_INT_PIN), wakeupCallback, FALLING);
 
-  drawFrame(0, detectOrientation());
+  // 登場アニメーションから開始
+  entranceDone = false;
+  entranceStep = 0;
+  entranceOrient = 0;
+  tftFillScreen888(0, 0, 0);
   lastActivityMs = millis();
 }
 
@@ -955,6 +995,10 @@ void loop() {
     lastActivityMs = millis();
     lastFrameTime = millis();
     lastDrawnFrame = -1;  // 再描画
+    entranceDone = false;  // 登場アニメ再生
+    entranceStep = 0;
+    entranceOrient = 0;
+    tftFillScreen888(0, 0, 0);
     return;
   }
 
@@ -963,6 +1007,27 @@ void loop() {
     backlightDim();
   } else {
     backlightFull();
+  }
+
+  // 登場アニメーション (entranceOrient の向きで描画)
+  if (!entranceDone) {
+    if (now - lastFrameTime >= ENTRANCE_INTERVAL_MS) {
+      lastFrameTime = now;
+      if (entranceStep < ENTRANCE_FRAMES) {
+        clearMargins(entranceOrient);
+        drawEntranceFrame(entranceStep, entranceOrient);
+        currentOrient = entranceOrient;
+        entranceStep++;
+      } else {
+        // 登場完了 → ベースフレーム描画してまばたきループへ
+        drawBaseFrame(entranceOrient);
+        currentOrient = entranceOrient;
+        lastDrawnFrame = 0;
+        currentFrame = 0;
+        entranceDone = true;
+      }
+    }
+    return;
   }
 
   // 傾き検出と描画
