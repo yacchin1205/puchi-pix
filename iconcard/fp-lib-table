@@ -1,0 +1,6 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Power (スライドSW)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/MST-12D18G4.pretty")(options "")(descr ""))
+  (lib (name "RST/BOOT (タクトSW)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/TL3301AF160QG.pretty")(options "")(descr ""))
+  (lib (name "J4 (USB-C 6P)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/TYPE-C-6P.pretty")(options "")(descr ""))
+)

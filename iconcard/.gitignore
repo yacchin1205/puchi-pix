@@ -1,0 +1,17 @@
+# KiCad lock files (open editor)
+~*.lck
+
+# KiCad local settings (user-specific)
+*.kicad_prl
+
+# KiCad auto-generated cache
+fp-info-cache
+
+# KiCad autosave
+\#auto_saved_files\#
+
+# KiCad backups
+*-backups/
+
+# DRC/ERC reports (regenerable)
+*.rpt
