@@ -5370,6 +5370,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C309458"
+			(at 123.19 135.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "7f5e6d42-f82d-4060-b0d7-47a95a788ac6")
 		)
@@ -5440,6 +5449,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25879"
+			(at 160.02 135.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "e59a6e31-6bc6-4af5-a270-0898c7656b80")
 		)
@@ -5502,6 +5520,15 @@
 			)
 		)
 		(property "Description" "Resistor"
+			(at 96.52 43.18 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C4109"
 			(at 96.52 43.18 0)
 			(effects
 				(font
@@ -5712,6 +5739,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C724040"
+			(at 205.74 86.36 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "4daebe05-f91f-4642-a240-3822880c748d")
 		)
@@ -5836,6 +5872,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C309458"
+			(at 194.31 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "b5179e01-0043-4c54-b780-40a4128dcb59")
 		)
@@ -5856,9 +5901,9 @@
 		(at 280.67 78.74 0)
 		(unit 1)
 		(exclude_from_sim no)
-		(in_bom yes)
+		(in_bom no)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(fields_autoplaced yes)
 		(uuid "1fbe73df-53f8-441f-b125-dcef88d1fa35")
 		(property "Reference" "J2"
@@ -5898,6 +5943,15 @@
 			)
 		)
 		(property "Description" "Generic connector, single row, 01x07, script generated"
+			(at 280.67 78.74 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" ""
 			(at 280.67 78.74 0)
 			(effects
 				(font
@@ -6030,7 +6084,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "RST/BOOT (タクトSW):KEY-SMD_4P-L6.0-W6.0-P4.50-LS10.0"
+		(property "Footprint" "SKRPACE010:KEY-SMD_4P-L4.2-W3.2-P2.20-LS4.6"
 			(at 162.56 78.74 0)
 			(effects
 				(font
@@ -6050,6 +6104,15 @@
 		)
 		(property "Description" "Push button switch, generic, two pins"
 			(at 167.64 78.74 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C139797"
+			(at 167.64 78.74 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -6193,6 +6256,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C380332"
+			(at 128.27 67.31 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "41bb9a06-a4a0-4400-bcd8-a650fef4b66d")
 		)
@@ -6263,6 +6335,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C19666"
+			(at 182.88 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "f98fd848-fe75-4173-b784-94dcf3f5d8f3")
 		)
@@ -6325,6 +6406,15 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
+			(at 138.43 135.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 138.43 135.89 0)
 			(effects
 				(font
@@ -6535,6 +6625,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25905"
+			(at 53.34 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "45ba88be-ff47-4e6f-a9c1-334e9425cf4a")
 		)
@@ -6605,6 +6704,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C380332"
+			(at 102.87 67.31 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "3b6e396f-ce1b-4fdb-af01-c2573f8c9abb")
 		)
@@ -6629,7 +6737,7 @@
 		(on_board yes)
 		(dnp no)
 		(uuid "58577a22-2879-45bd-86bc-ef98eb0269f4")
-		(property "Reference" "CHARGE_STATUS1"
+		(property "Reference" "CHG1"
 			(at 100.33 33.3374 90)
 			(effects
 				(font
@@ -6683,6 +6791,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C2286"
+			(at 96.52 33.02 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "013d49b4-d663-467b-992d-cee94fd24fec")
 		)
@@ -6692,7 +6809,7 @@
 		(instances
 			(project "iconcard"
 				(path "/a59c2622-6ce7-446a-89c3-2bd91ca85994"
-					(reference "CHARGE_STATUS1")
+					(reference "CHG1")
 					(unit 1)
 				)
 			)
@@ -6878,6 +6995,15 @@
 			)
 		)
 		(property "Description" "Single cell, Li-Ion/Li-Po charge management controller, 4.20V, Tri-State Status Output, in SOT23-5 package"
+			(at 78.74 54.61 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C424093"
 			(at 78.74 54.61 0)
 			(effects
 				(font
@@ -7097,6 +7223,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C4109"
+			(at 245.11 60.96 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "b1ac2b73-f433-42b3-8d61-8a973a38115a")
 		)
@@ -7159,6 +7294,15 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
+			(at 60.96 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C380332"
 			(at 60.96 55.88 0)
 			(effects
 				(font
@@ -7237,6 +7381,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C380332"
+			(at 147.32 67.31 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "0684901a-5e35-45fb-b322-847889fc1ffa")
 		)
@@ -7299,6 +7452,15 @@
 			)
 		)
 		(property "Description" "Unpolarized capacitor"
+			(at 156.21 78.74 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 156.21 78.74 0)
 			(effects
 				(font
@@ -7398,7 +7560,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "bb64fc65-1ac4-456c-89b3-640c0339dd4b")
-		(property "Reference" "STM32_STATUS1"
+		(property "Reference" "STAT1"
 			(at 248.92 51.1174 90)
 			(effects
 				(font
@@ -7452,6 +7614,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C12624"
+			(at 245.11 50.8 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "e6e57132-f112-42e0-8e12-30fcc879d1d1")
 		)
@@ -7461,7 +7632,7 @@
 		(instances
 			(project ""
 				(path "/a59c2622-6ce7-446a-89c3-2bd91ca85994"
-					(reference "STM32_STATUS1")
+					(reference "STAT1")
 					(unit 1)
 				)
 			)
@@ -7512,6 +7683,15 @@
 			)
 		)
 		(property "Description" "600mA low dropout linear regulator, with enable pin, 3.8V-6V input voltage range, 3.3V fixed positive output, SOT-23-5"
+			(at 139.7 54.61 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C51118"
 			(at 139.7 54.61 0)
 			(effects
 				(font
@@ -7665,6 +7845,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25879"
+			(at 151.13 135.89 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "f0d282ef-fa82-4df3-9590-c887e9580e80")
 		)
@@ -7801,6 +7990,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C968533"
+			(at 129.54 19.05 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "79995aa9-7046-40d9-a6a7-c728938a8a01")
 		)
@@ -7871,6 +8069,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C7527619"
+			(at 279.4 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "2"
 			(uuid "28e08caa-17e8-48f5-b0f4-c9cbdd7d8a58")
 		)
@@ -7920,7 +8127,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "RST/BOOT (タクトSW):KEY-SMD_4P-L6.0-W6.0-P4.50-LS10.0"
+		(property "Footprint" "SKRPACE010:KEY-SMD_4P-L4.2-W3.2-P2.20-LS4.6"
 			(at 247.65 95.25 0)
 			(effects
 				(font
@@ -7940,6 +8147,15 @@
 		)
 		(property "Description" "Push button switch, generic, two pins"
 			(at 252.73 95.25 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C139797"
+			(at 252.73 95.25 90)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -8017,6 +8233,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25744"
+			(at 252.73 109.22 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "e15f2f5f-bd8d-40e1-a384-3d97c91ec967")
 		)
@@ -8077,6 +8302,15 @@
 			)
 		)
 		(property "Description" "USB Power-Only 6P Type-C Receptacle connector"
+			(at 29.21 35.56 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C456012"
 			(at 29.21 35.56 0)
 			(effects
 				(font
@@ -8170,6 +8404,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25903"
+			(at 68.58 66.04 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "ff50ed9c-2118-4b02-ae1e-eed5d65a1776")
 		)
@@ -8232,6 +8475,15 @@
 			)
 		)
 		(property "Description" "±2g / 4g / 8g / 16g Tri-Axis Digital Accelerometer, I2C, 1.71-3.6V, LGA-12"
+			(at 135.89 156.21 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C442603"
 			(at 135.89 156.21 0)
 			(effects
 				(font
@@ -8405,6 +8657,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25905"
+			(at 46.99 55.88 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(pin "1"
 			(uuid "f31eaee0-14d4-468c-9680-964f3cf2b322")
 		)
@@ -8465,6 +8726,15 @@
 			)
 		)
 		(property "Description" "Switch, single pole double throw"
+			(at 115.57 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C49023767"
 			(at 115.57 57.15 0)
 			(effects
 				(font

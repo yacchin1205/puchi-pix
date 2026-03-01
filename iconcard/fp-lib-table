@@ -3,4 +3,6 @@
   (lib (name "Power (スライドSW)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/MST-12D18G4.pretty")(options "")(descr ""))
   (lib (name "RST/BOOT (タクトSW)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/TL3301AF160QG.pretty")(options "")(descr ""))
   (lib (name "J4 (USB-C 6P)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/TYPE-C-6P.pretty")(options "")(descr ""))
+  (lib (name "HX-3x6x2.5-X")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/HX-3x6x2.5-X.pretty")(options "")(descr ""))
+  (lib (name "SKRPACE010")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/SKRPACE010.pretty")(options "")(descr ""))
 )
