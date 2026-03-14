@@ -89,7 +89,17 @@ static uint8_t entranceStep = 0;  // 0,1 = entrance frames, 2 = base (done)
 static uint8_t entranceOrient = 0; // 登場アニメの向き
 
 // Entrance frame data tables (4-bit packed, indexed by entranceStep)
-static const uint8_t* const entranceFrames[3] PROGMEM = { entranceFrame0, entranceFrame1, entranceFrame2 };
+#if ENTRANCE_FRAMES > 0
+static const uint8_t* const entranceFrames[] PROGMEM = {
+  entranceFrame0
+#if ENTRANCE_FRAMES > 1
+  , entranceFrame1
+#endif
+#if ENTRANCE_FRAMES > 2
+  , entranceFrame2
+#endif
+};
+#endif
 
 // ---------- KXTJ3 low-level ----------
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -448,6 +458,7 @@ static void drawBaseFrame(uint8_t orient) {
 }
 
 // 登場フレーム描画 - フル or オーバーレイ自動判定
+#if ENTRANCE_FRAMES > 0
 static void drawEntranceFrame(uint8_t frameIdx, uint8_t orient) {
   const uint8_t* frameData = (const uint8_t*)pgm_read_ptr(&entranceFrames[frameIdx]);
   uint8_t isOverlay = pgm_read_byte(&entranceIsOverlay[frameIdx]);
@@ -476,6 +487,7 @@ static void drawEntranceFrame(uint8_t frameIdx, uint8_t orient) {
     }
   }
 }
+#endif
 
 // 任意の矩形オーバーレイ領域を描画 (4-bit packed, 回転対応)
 static void drawOverlayRegion(const uint8_t* data, uint8_t orient,
@@ -1067,9 +1079,11 @@ void loop() {
     if (now - lastFrameTime >= ENTRANCE_INTERVAL_MS) {
       lastFrameTime = now;
       if (entranceStep < ENTRANCE_FRAMES) {
+#if ENTRANCE_FRAMES > 0
         clearMargins(entranceOrient);
         drawEntranceFrame(entranceStep, entranceOrient);
         currentOrient = entranceOrient;
+#endif
         entranceStep++;
       } else {
         // 登場完了 → ベースフレーム描画してまばたきループへ

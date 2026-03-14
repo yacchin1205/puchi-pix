@@ -22,9 +22,9 @@ OUTPUT_FILE = os.path.join(SCRIPT_DIR, '..', 'firmware', 'puchi_pix', 'image_dat
 DEFAULT_GIF = os.path.join(SCRIPT_DIR, '..', 'animation.gif')
 
 # Frame assignments
-ENTRANCE_FRAME_INDICES = [0, 1, 2]
-BASE_FRAME_INDEX = 3
-BLINK_FRAME_INDICES = [4, 5]  # overlay frames for blink animation
+ENTRANCE_FRAME_INDICES = []
+BASE_FRAME_INDEX = 0
+BLINK_FRAME_INDICES = [1, 2]  # overlay frames for blink animation
 
 # If overlay region occupies less than this fraction of full frame,
 # store as overlay. Otherwise store as full frame.
@@ -42,15 +42,37 @@ def quantize_to_palette(img_arr, max_colors=PALETTE_SIZE):
     img = Image.fromarray(img_arr)
     quantized = img.quantize(colors=max_colors, method=Image.MEDIANCUT)
     palette_data = quantized.getpalette()[:max_colors * 3]
+    indexed = np.array(quantized)
 
-    palette_rgb565 = []
     palette_rgb = []
     for i in range(0, len(palette_data), 3):
-        r, g, b = palette_data[i], palette_data[i + 1], palette_data[i + 2]
-        palette_rgb565.append(rgb_to_rgb565(r, g, b))
-        palette_rgb.append([r, g, b])
+        palette_rgb.append([palette_data[i], palette_data[i + 1], palette_data[i + 2]])
 
-    indexed = np.array(quantized)
+    # Ensure important colors (black, white) are in the palette
+    # If they exist in the original but not in the quantized palette,
+    # replace the least-used palette entry
+    flat_orig = img_arr.reshape(-1, 3)
+    important_colors = [[0, 0, 0], [255, 255, 255]]
+    for ic in important_colors:
+        has_in_orig = np.any(np.all(flat_orig == ic, axis=1))
+        has_in_palette = any(p == ic for p in palette_rgb)
+        if has_in_orig and not has_in_palette:
+            # Find least-used palette index
+            flat_indexed = indexed.flatten()
+            counts = np.bincount(flat_indexed, minlength=max_colors)
+            least_used = int(np.argmin(counts))
+            old_color = palette_rgb[least_used]
+            palette_rgb[least_used] = ic
+            # Remap: pixels that were the old color AND are closer to the
+            # important color in the original get remapped
+            orig_is_ic = np.all(img_arr == ic, axis=2)
+            indexed[orig_is_ic] = least_used
+            print(f"  Palette fix: replaced [{old_color}] (idx {least_used}, {counts[least_used]} uses) with {ic}")
+
+    palette_rgb565 = []
+    for r, g, b in palette_rgb:
+        palette_rgb565.append(rgb_to_rgb565(r, g, b))
+
     return palette_rgb565, palette_rgb, indexed
 
 
@@ -278,22 +300,23 @@ def main():
         f.write(f'static const uint8_t ENTRANCE_FRAMES = {total_entrance};\n')
         f.write(f'static const uint16_t ENTRANCE_INTERVAL_MS = {ENTRANCE_INTERVAL_MS};\n\n')
 
-        # For each entrance frame, record whether it's full or overlay
-        # Generate a flag array: 0 = full frame, 1 = overlay on base
-        entrance_flags = []
-        for i in ENTRANCE_FRAME_INDICES:
-            entrance_flags.append(0 if frame_info[i]['mode'] == 'full' else 1)
-        write_c_array(f, 'uint8_t', 'entranceIsOverlay', entrance_flags, per_line=16)
+        # Entrance data (only if there are entrance frames)
+        if ENTRANCE_FRAME_INDICES:
+            # For each entrance frame, record whether it's full or overlay
+            entrance_flags = []
+            for i in ENTRANCE_FRAME_INDICES:
+                entrance_flags.append(0 if frame_info[i]['mode'] == 'full' else 1)
+            write_c_array(f, 'uint8_t', 'entranceIsOverlay', entrance_flags, per_line=16)
 
-        # For overlay entrance frames, record the region
-        overlay_entrance_regions = []
-        for i in ENTRANCE_FRAME_INDICES:
-            if frame_info[i]['mode'] == 'overlay' and frame_info[i]['region']:
-                x, y, w, h = frame_info[i]['region']
-                overlay_entrance_regions.extend([x, y, w, h])
-            else:
-                overlay_entrance_regions.extend([0, 0, 0, 0])
-        write_c_array(f, 'uint8_t', 'entranceOverlayRegion', overlay_entrance_regions, per_line=4)
+            # For overlay entrance frames, record the region
+            overlay_entrance_regions = []
+            for i in ENTRANCE_FRAME_INDICES:
+                if frame_info[i]['mode'] == 'overlay' and frame_info[i]['region']:
+                    x, y, w, h = frame_info[i]['region']
+                    overlay_entrance_regions.extend([x, y, w, h])
+                else:
+                    overlay_entrance_regions.extend([0, 0, 0, 0])
+            write_c_array(f, 'uint8_t', 'entranceOverlayRegion', overlay_entrance_regions, per_line=4)
 
         # Shared palette
         write_c_array(f, 'uint16_t', 'palette', palette, per_line=8)
@@ -322,7 +345,7 @@ def main():
     ent_bytes = sum(len(packed[k]) for k in packed if k[0].startswith('entrance'))
     base_bytes = len(packed[('base', BASE_FRAME_INDEX)])
     blink_bytes = sum(len(packed[k]) for k in packed if k[0] == 'blink_overlay')
-    meta_bytes = len(entrance_flags) + len(overlay_entrance_regions)
+    meta_bytes = (len(entrance_flags) + len(overlay_entrance_regions)) if ENTRANCE_FRAME_INDICES else 0
     total = pal_bytes + ent_bytes + base_bytes + blink_bytes + meta_bytes
 
     print(f"\nGenerated: {OUTPUT_FILE}")
