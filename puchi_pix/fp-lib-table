@@ -5,4 +5,5 @@
   (lib (name "J4 (USB-C 6P)")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/TYPE-C-6P.pretty")(options "")(descr ""))
   (lib (name "HX-3x6x2.5-X")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/HX-3x6x2.5-X.pretty")(options "")(descr ""))
   (lib (name "SKRPACE010")(type "KiCad")(uri "${KIPRJMOD}/custom_footprints/SKRPACE010.pretty")(options "")(descr ""))
+  (lib (name "brand")(type "KiCad")(uri "${KIPRJMOD}/brand.pretty")(options "")(descr ""))
 )
