@@ -1,13 +1,13 @@
 ---
 name: generate-icon-data
-description: Generate image_data.h for Puchi-Pix from a pixel art GIF animation. Use when the user provides a new GIF icon and wants to convert it to firmware image data.
+description: Generate icon header for Puchi-Pix from a pixel art GIF animation. Use when the user provides a new GIF icon and wants to convert it to firmware image data.
 argument-hint: [gif-path]
 allowed-tools: Read, Bash, Glob, Grep, Write, Edit
 ---
 
 # Generate Icon Data for Puchi-Pix
 
-Convert a pixel art GIF animation into `image_data.h` for the Puchi-Pix firmware.
+Convert a pixel art GIF animation into `icon_<name>.h` for the Puchi-Pix firmware.
 
 ## Prerequisites
 
@@ -54,51 +54,32 @@ Ask the user two questions only:
 Do NOT assume what the remaining frames represent. The user will describe them.
 The remaining frames (after entrance and base) are the **animation overlay frames** - they may be blink frames, expression changes, or anything else.
 
-### Step 3: Auto-detect animation overlay region
+### Step 3: Build the frame config
 
-Compare the base frame with each animation overlay frame to find the bounding box of all pixel differences:
-
-```python
-from PIL import Image
-import numpy as np
-
-# Compute union of all diffs between base and overlay frames
-combined_diff = np.zeros((img_h, img_w), dtype=bool)
-for overlay_frame in overlay_frames:
-    diff = np.any(base != overlay_frame, axis=2)
-    combined_diff |= diff
-
-ys, xs = np.where(combined_diff)
-# Add 1px margin, ensure even width for 4-bit packing
-OVERLAY_X = max(0, xs.min() - 1)
-OVERLAY_Y = max(0, ys.min() - 1)
-OVERLAY_W = min(img_w, xs.max() + 2) - OVERLAY_X
-OVERLAY_H = min(img_h, ys.max() + 2) - OVERLAY_Y
-if OVERLAY_W % 2 != 0:
-    OVERLAY_W += 1
+Config format for `generate_image_data.py`:
+```
+gif_frame:next[:ref[:duration_ms]]
 ```
 
-Show the detected region to the user (scaled up with nearest-neighbor) for confirmation.
+- `ref`: reference frame index for overlay (omit or empty for full frame)
+- `duration_ms`: display duration in ms (default: 150)
+- Entrance frames: full, 150ms each, chained sequentially
+- Base frame: full, 2000ms (idle wait), next points to first animation frame
+- Animation frames: overlay on base, 150ms each, last one loops back to base
+- If gif frames are identical (diff=0), reuse the same gif frame index to avoid duplicate data
 
-### Step 4: Update generate_image_data.py
+Example (entrance f0-f2, base f3, blink f4-f6):
+```
+0:1::150,1:2::150,2:3::150,3:4::2000,4:5:3:150,5:6:3:150,4:3:3:150
+```
 
-Update `resources/generate_image_data.py` with:
-- New overlay region coordinates
-- New ENTRANCE_FRAMES count
-- New frame assignments (number of overlay frames may differ)
-- The script should handle variable numbers of overlay frames
-
-The script must generate:
-- Entrance frame data (4-bit packed, full frame)
-- Base frame data (4-bit packed, full frame)
-- Overlay frame data for each animation frame (4-bit packed, overlay region only)
-- Shared 16-color palette (RGB565)
-
-### Step 5: Run the script and verify
+### Step 4: Run the script and verify
 
 ```bash
-python3 resources/generate_image_data.py "$GIF_PATH"
+python3 resources/generate_image_data.py "$GIF_PATH" "$CONFIG"
 ```
+
+Output filename is `icon_<name>.h` (derived from GIF filename). Ensure no spaces in the filename — rename if needed.
 
 The script includes a built-in verification step that:
 1. Reconstructs each frame from the generated indexed data (full frames + overlay compositing)
@@ -112,15 +93,19 @@ Check the verification output:
 - If white highlights are lost, the background replacement (flood fill) may need adjustment
 - Quantization differences (a few pixels per frame) are normal with 16-color palette
 - Total bytes must fit in flash (32KB shared with firmware, ~22KB used by firmware)
+- **Flash超過時**: diff matrixでベースとの差分が小さい登場フレームをoverlayに変更する。full frame (2048B) → overlay (~30-200B) で大幅に節約できる
 
-### Step 6: Update firmware if needed
+### Step 5: Update firmware include
 
-In `firmware/puchi_pix/puchi_pix.ino`, verify:
-- `IMG_FRAMES` matches the overlay frame count
-- Animation timing constants are appropriate
-- The overlay drawing code handles the correct number of frames
+In `firmware/puchi_pix/puchi_pix.ino`, change the icon include at the top of the file:
 
-### Step 7: Build and test
+```cpp
+#include "icon_<name>.h"
+```
+
+This is the ONLY change needed in the .ino — the Frame struct-based animation system handles everything else automatically.
+
+### Step 6: Build and test
 
 Remind the user to:
 1. Open `firmware/puchi_pix/puchi_pix.ino` in Arduino IDE
@@ -131,9 +116,9 @@ Remind the user to:
 
 - All frames share a single **16-color palette** (RGB565)
 - Pixels are **4-bit packed** (2 pixels per byte, high nibble first)
-- Entrance frames: full 64x64
-- Base frame: full 64x64
-- Overlay frames: only the detected region, drawn on top of base frame
+- Each frame is a `Frame` struct (defined in `frame.h`) with type, next, ref, region, duration_ms, and data pointer
+- Full frames: complete IMG_W x IMG_H pixel data
+- Overlay frames: only the diff region, drawn on top of the reference frame
 - Background color: auto-detected (most common color in base frame) and replaced with black
 - Background replacement uses **flood fill from edges** to preserve interior pixels of the same color (e.g. white highlights in eyes)
 - Each non-base frame is automatically stored as full frame or overlay based on diff size vs base (threshold: 50% of full frame)
