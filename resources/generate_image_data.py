@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate image_data.h for entrance + blink animation from a GIF.
+Generate image_data.h for Puchi-Pix animation from a GIF.
 
-GIF frame layout:
-  0: entrance frame 0 (ears peeking)
-  1: entrance frame 1 (half head)
-  2: base frame (full character, eyes open)
-  3: half-closed eyes
-  4: closed eyes
-  5: half-closed eyes (same as 3, ignored)
+Each non-base frame is automatically stored as either:
+  - Full frame (4-bit packed) if diff from base is large
+  - Overlay region (4-bit packed, bounding box only) if diff is small
 
-All frames share a single 16-color palette.
-Base frame and eye regions use 4-bit packed pixel data (2 pixels/byte).
-Entrance frames use RLE compression with 4-bit palette indices.
+The threshold for overlay vs full is configurable (OVERLAY_THRESHOLD).
 
 Run: python3 resources/generate_image_data.py [gif_path]
 """
@@ -22,19 +16,21 @@ import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(SCRIPT_DIR, '..', 'image_data.h')
+OUTPUT_FILE = os.path.join(SCRIPT_DIR, '..', 'firmware', 'puchi_pix', 'image_data.h')
 
 # Default GIF path (can be overridden via command line)
 DEFAULT_GIF = os.path.join(SCRIPT_DIR, '..', 'animation.gif')
 
-# Eye region coordinates
-EYE_X, EYE_Y = 15, 43
-EYE_W, EYE_H = 33, 14
+# Frame assignments
+ENTRANCE_FRAME_INDICES = [0, 1, 2]
+BASE_FRAME_INDEX = 3
+BLINK_FRAME_INDICES = [4, 5]  # overlay frames for blink animation
 
-# Entrance animation
-ENTRANCE_FRAMES = 2
+# If overlay region occupies less than this fraction of full frame,
+# store as overlay. Otherwise store as full frame.
+OVERLAY_THRESHOLD = 0.5
+
 ENTRANCE_INTERVAL_MS = 200
-
 PALETTE_SIZE = 16
 
 
@@ -48,12 +44,14 @@ def quantize_to_palette(img_arr, max_colors=PALETTE_SIZE):
     palette_data = quantized.getpalette()[:max_colors * 3]
 
     palette_rgb565 = []
+    palette_rgb = []
     for i in range(0, len(palette_data), 3):
         r, g, b = palette_data[i], palette_data[i + 1], palette_data[i + 2]
         palette_rgb565.append(rgb_to_rgb565(r, g, b))
+        palette_rgb.append([r, g, b])
 
     indexed = np.array(quantized)
-    return palette_rgb565, indexed
+    return palette_rgb565, palette_rgb, indexed
 
 
 def pack_4bit(data):
@@ -65,22 +63,6 @@ def pack_4bit(data):
         lo = flat[i + 1] & 0x0F if i + 1 < len(flat) else 0
         packed.append((hi << 4) | lo)
     return packed
-
-
-def rle_encode(data):
-    """RLE encode: pairs of (count, value). count max 255, value 0-15."""
-    flat = data.flatten().tolist()
-    encoded = []
-    i = 0
-    while i < len(flat):
-        val = flat[i]
-        count = 1
-        while i + count < len(flat) and flat[i + count] == val and count < 255:
-            count += 1
-        encoded.append(count)
-        encoded.append(val)
-        i += count
-    return encoded
 
 
 def write_c_array(f, type_str, name, data, per_line=16):
@@ -109,6 +91,32 @@ def extract_gif_frames(gif_path):
     return frames
 
 
+def compute_diff_region(base, frame, img_w, img_h):
+    """Compute bounding box of pixel differences between base and frame.
+    Returns (x, y, w, h) with 1px margin and even width, or None if identical."""
+    diff = np.any(base != frame, axis=2)
+    if not diff.any():
+        return None
+    ys, xs = np.where(diff)
+    x = max(0, int(xs.min()) - 1)
+    y = max(0, int(ys.min()) - 1)
+    w = min(img_w, int(xs.max()) + 2) - x
+    h = min(img_h, int(ys.max()) + 2) - y
+    if w % 2 != 0:
+        w = min(img_w - x, w + 1)
+    return (x, y, w, h)
+
+
+def should_use_overlay(region, img_w, img_h):
+    """Decide whether to store as overlay (True) or full frame (False)."""
+    if region is None:
+        return True  # identical to base, store as tiny overlay
+    x, y, w, h = region
+    region_pixels = w * h
+    full_pixels = img_w * img_h
+    return (region_pixels / full_pixels) < OVERLAY_THRESHOLD
+
+
 def main():
     gif_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GIF
 
@@ -120,70 +128,143 @@ def main():
     frames = extract_gif_frames(gif_path)
     print(f"Extracted {len(frames)} frames")
 
-    if len(frames) < 5:
-        print(f"Error: Expected at least 5 frames, got {len(frames)}")
+    all_indices = ENTRANCE_FRAME_INDICES + [BASE_FRAME_INDEX] + BLINK_FRAME_INDICES
+    min_frames = max(all_indices) + 1
+    if len(frames) < min_frames:
+        print(f"Error: Expected at least {min_frames} frames, got {len(frames)}")
         sys.exit(1)
 
-    # Replace background color with black
-    # Detect from base frame (frame 2) - most common color
-    flat = frames[2].reshape(-1, 3)
+    # Replace background color with black using flood fill from edges
+    # This preserves interior pixels of the same color (e.g. white highlights)
+    from scipy import ndimage
+    flat = frames[BASE_FRAME_INDEX].reshape(-1, 3)
     unique, counts = np.unique(flat, axis=0, return_counts=True)
     bg_color = unique[np.argmax(counts)]
     total_replaced = 0
     for i in range(len(frames)):
-        mask = np.all(frames[i] == bg_color, axis=2)
-        frames[i][mask] = [0, 0, 0]
-        total_replaced += mask.sum()
-    print(f"Background {bg_color} -> black ({total_replaced} px total)")
+        bg_mask = np.all(frames[i] == bg_color, axis=2)
+        # Label connected components of background-colored pixels
+        labeled, num_features = ndimage.label(bg_mask)
+        # Find labels that touch any edge
+        edge_labels = set()
+        h, w = bg_mask.shape
+        for edge in [labeled[0, :], labeled[h-1, :], labeled[:, 0], labeled[:, w-1]]:
+            edge_labels.update(edge[edge > 0].tolist())
+        # Only replace background pixels connected to edges
+        exterior_mask = np.isin(labeled, list(edge_labels))
+        frames[i][exterior_mask] = [0, 0, 0]
+        total_replaced += exterior_mask.sum()
+    print(f"Background {bg_color} -> black (flood fill, {total_replaced} px total)")
 
-    # Frame assignments
-    entrance0_arr = frames[0]
-    entrance1_arr = frames[1]
-    base_arr = frames[2]
-    half_arr = frames[3]
-    closed_arr = frames[4]
-
-    img_w, img_h = base_arr.shape[1], base_arr.shape[0]
+    base_arr = frames[BASE_FRAME_INDEX]
+    img_h, img_w = base_arr.shape[:2]
     print(f"Image size: {img_w}x{img_h}")
 
-    # Extract eye regions
-    eye_half = half_arr[EYE_Y:EYE_Y + EYE_H, EYE_X:EYE_X + EYE_W]
-    eye_closed = closed_arr[EYE_Y:EYE_Y + EYE_H, EYE_X:EYE_X + EYE_W]
+    # Analyze all non-base frames: decide overlay vs full
+    non_base_indices = ENTRANCE_FRAME_INDICES + BLINK_FRAME_INDICES
+    frame_info = {}  # index -> { 'mode': 'full'|'overlay', 'region': (x,y,w,h)|None }
+    for i in non_base_indices:
+        region = compute_diff_region(base_arr, frames[i], img_w, img_h)
+        use_overlay = should_use_overlay(region, img_w, img_h)
+        mode = 'overlay' if use_overlay else 'full'
+        frame_info[i] = {'mode': mode, 'region': region}
+        if region:
+            x, y, w, h = region
+            savings = (img_w * img_h // 2) - (w * h // 2) if use_overlay else 0
+            print(f"  Frame {i}: {mode} (diff region {w}x{h} at ({x},{y}), {savings}B saved)" if use_overlay
+                  else f"  Frame {i}: {mode} (diff region {w}x{h}, too large for overlay)")
+        else:
+            print(f"  Frame {i}: overlay (identical to base)")
 
-    # Pad eye regions to img_w width for vstack, then quantize all together
-    def pad_to_width(arr, w):
-        if arr.shape[1] == w:
-            return arr
-        padded = np.zeros((arr.shape[0], w, 3), dtype=arr.dtype)
-        padded[:, :arr.shape[1]] = arr
-        return padded
+    # Determine blink overlay region (union of all blink frame diffs)
+    blink_regions = [frame_info[i]['region'] for i in BLINK_FRAME_INDICES if frame_info[i]['region']]
+    if blink_regions:
+        bx = min(r[0] for r in blink_regions)
+        by = min(r[1] for r in blink_regions)
+        bx2 = max(r[0] + r[2] for r in blink_regions)
+        by2 = max(r[1] + r[3] for r in blink_regions)
+        bw = bx2 - bx
+        bh = by2 - by
+        if bw % 2 != 0:
+            bw = min(img_w - bx, bw + 1)
+        EYE_X, EYE_Y, EYE_W, EYE_H = bx, by, bw, bh
+    else:
+        EYE_X, EYE_Y, EYE_W, EYE_H = 0, 0, 2, 2
+    print(f"Blink overlay region: ({EYE_X},{EYE_Y}) {EYE_W}x{EYE_H}")
 
-    combined = np.vstack([entrance0_arr, entrance1_arr, base_arr,
-                          pad_to_width(eye_half, img_w),
-                          pad_to_width(eye_closed, img_w)])
-    palette, combined_indexed = quantize_to_palette(combined, PALETTE_SIZE)
+    # Collect entrance overlay regions (for overlay-mode entrance frames)
+    entrance_overlay_regions = {}
+    for i in ENTRANCE_FRAME_INDICES:
+        if frame_info[i]['mode'] == 'overlay' and frame_info[i]['region']:
+            entrance_overlay_regions[i] = frame_info[i]['region']
 
-    y = 0
-    ent0_indexed = combined_indexed[y:y + img_h]; y += img_h
-    ent1_indexed = combined_indexed[y:y + img_h]; y += img_h
-    base_indexed = combined_indexed[y:y + img_h]; y += img_h
-    half_indexed = combined_indexed[y:y + EYE_H, :EYE_W]; y += EYE_H
-    closed_indexed = combined_indexed[y:y + EYE_H, :EYE_W]
+    # Build combined image for unified palette quantization
+    # Include: all full entrance frames, base, all overlay regions
+    parts = []
+    part_map = []  # track what's where
 
+    # Full entrance frames
+    for i in ENTRANCE_FRAME_INDICES:
+        if frame_info[i]['mode'] == 'full':
+            parts.append(frames[i])
+            part_map.append(('entrance_full', i, img_h))
+
+    # Base frame
+    parts.append(base_arr)
+    part_map.append(('base', BASE_FRAME_INDEX, img_h))
+
+    # Entrance overlay regions
+    for i in ENTRANCE_FRAME_INDICES:
+        if frame_info[i]['mode'] == 'overlay' and frame_info[i]['region']:
+            x, y, w, h = frame_info[i]['region']
+            region = frames[i][y:y+h, x:x+w]
+            padded = np.zeros((h, img_w, 3), dtype=region.dtype)
+            padded[:, :w] = region
+            parts.append(padded)
+            part_map.append(('entrance_overlay', i, h))
+
+    # Blink overlay regions
+    for i in BLINK_FRAME_INDICES:
+        region = frames[i][EYE_Y:EYE_Y+EYE_H, EYE_X:EYE_X+EYE_W]
+        padded = np.zeros((EYE_H, img_w, 3), dtype=region.dtype)
+        padded[:, :EYE_W] = region
+        parts.append(padded)
+        part_map.append(('blink_overlay', i, EYE_H))
+
+    combined = np.vstack(parts)
+    palette, quantized_palette_rgb, combined_indexed = quantize_to_palette(combined, PALETTE_SIZE)
     print(f"Palette: {len(palette)} colors")
 
-    # Encode data (all 4-bit packed for random access / rotation support)
-    ent0_packed = pack_4bit(ent0_indexed)
-    ent1_packed = pack_4bit(ent1_indexed)
-    base_packed = pack_4bit(base_indexed)
-    half_packed = pack_4bit(half_indexed)
-    closed_packed = pack_4bit(closed_indexed)
+    # Extract indexed data from combined
+    y_offset = 0
+    indexed_data = {}
+    for kind, idx, height in part_map:
+        if kind == 'entrance_full':
+            indexed_data[('entrance_full', idx)] = combined_indexed[y_offset:y_offset+height]
+        elif kind == 'base':
+            indexed_data[('base', idx)] = combined_indexed[y_offset:y_offset+height]
+        elif kind == 'entrance_overlay':
+            x, _, w, h = frame_info[idx]['region']
+            indexed_data[('entrance_overlay', idx)] = combined_indexed[y_offset:y_offset+height, :w]
+        elif kind == 'blink_overlay':
+            indexed_data[('blink_overlay', idx)] = combined_indexed[y_offset:y_offset+height, :EYE_W]
+        y_offset += height
+
+    # Pack all data
+    packed = {}
+    for key, data in indexed_data.items():
+        packed[key] = pack_4bit(data)
+
+    # Count entrance frames by type
+    entrance_full_count = sum(1 for i in ENTRANCE_FRAME_INDICES if frame_info[i]['mode'] == 'full')
+    entrance_overlay_count = sum(1 for i in ENTRANCE_FRAME_INDICES if frame_info[i]['mode'] == 'overlay')
 
     # Generate header file
     with open(OUTPUT_FILE, 'w') as f:
-        f.write('// Auto-generated image data for entrance + blink animation\n')
+        f.write('// Auto-generated image data for Puchi-Pix animation\n')
         f.write(f'// Palette: {PALETTE_SIZE} colors, shared across all frames\n')
-        f.write('// All frames: 4-bit packed (2 pixels/byte)\n')
+        f.write('// Full frames: 4-bit packed (2 pixels/byte)\n')
+        f.write('// Overlay frames: 4-bit packed, region only\n')
         f.write('// Run: python3 resources/generate_image_data.py\n\n')
         f.write(f'static const uint8_t IMG_W = {img_w};\n')
         f.write(f'static const uint8_t IMG_H = {img_h};\n')
@@ -191,36 +272,145 @@ def main():
         f.write(f'static const uint8_t EYE_Y = {EYE_Y};\n')
         f.write(f'static const uint8_t EYE_W = {EYE_W};\n')
         f.write(f'static const uint8_t EYE_H = {EYE_H};\n')
-        f.write(f'static const uint8_t ENTRANCE_FRAMES = {ENTRANCE_FRAMES};\n')
+
+        # Entrance info
+        total_entrance = len(ENTRANCE_FRAME_INDICES)
+        f.write(f'static const uint8_t ENTRANCE_FRAMES = {total_entrance};\n')
         f.write(f'static const uint16_t ENTRANCE_INTERVAL_MS = {ENTRANCE_INTERVAL_MS};\n\n')
 
-        # Shared palette (16 colors)
+        # For each entrance frame, record whether it's full or overlay
+        # Generate a flag array: 0 = full frame, 1 = overlay on base
+        entrance_flags = []
+        for i in ENTRANCE_FRAME_INDICES:
+            entrance_flags.append(0 if frame_info[i]['mode'] == 'full' else 1)
+        write_c_array(f, 'uint8_t', 'entranceIsOverlay', entrance_flags, per_line=16)
+
+        # For overlay entrance frames, record the region
+        overlay_entrance_regions = []
+        for i in ENTRANCE_FRAME_INDICES:
+            if frame_info[i]['mode'] == 'overlay' and frame_info[i]['region']:
+                x, y, w, h = frame_info[i]['region']
+                overlay_entrance_regions.extend([x, y, w, h])
+            else:
+                overlay_entrance_regions.extend([0, 0, 0, 0])
+        write_c_array(f, 'uint8_t', 'entranceOverlayRegion', overlay_entrance_regions, per_line=4)
+
+        # Shared palette
         write_c_array(f, 'uint16_t', 'palette', palette, per_line=8)
 
-        # Entrance frames - 4-bit packed
-        write_c_array(f, 'uint8_t', 'entranceFrame0', ent0_packed)
-        write_c_array(f, 'uint8_t', 'entranceFrame1', ent1_packed)
+        # Entrance frames
+        entrance_idx = 0
+        for i in ENTRANCE_FRAME_INDICES:
+            if frame_info[i]['mode'] == 'full':
+                write_c_array(f, 'uint8_t', f'entranceFrame{entrance_idx}',
+                              packed[('entrance_full', i)])
+            else:
+                write_c_array(f, 'uint8_t', f'entranceFrame{entrance_idx}',
+                              packed[('entrance_overlay', i)])
+            entrance_idx += 1
 
-        # Base frame - 4-bit packed
-        write_c_array(f, 'uint8_t', 'baseFrame', base_packed)
+        # Base frame
+        write_c_array(f, 'uint8_t', 'baseFrame', packed[('base', BASE_FRAME_INDEX)])
 
-        # Eye overlays - 4-bit packed
-        write_c_array(f, 'uint8_t', 'eyeHalf', half_packed)
-        write_c_array(f, 'uint8_t', 'eyeClosed', closed_packed)
+        # Blink overlays
+        blink_names = ['eyeHalf', 'eyeClosed']
+        for name, i in zip(blink_names, BLINK_FRAME_INDICES):
+            write_c_array(f, 'uint8_t', name, packed[('blink_overlay', i)])
 
     # Summary
     pal_bytes = PALETTE_SIZE * 2
-    ent_bytes = len(ent0_packed) + len(ent1_packed)
-    base_bytes = len(base_packed)
-    eye_bytes = len(half_packed) + len(closed_packed)
-    total = pal_bytes + ent_bytes + base_bytes + eye_bytes
+    ent_bytes = sum(len(packed[k]) for k in packed if k[0].startswith('entrance'))
+    base_bytes = len(packed[('base', BASE_FRAME_INDEX)])
+    blink_bytes = sum(len(packed[k]) for k in packed if k[0] == 'blink_overlay')
+    meta_bytes = len(entrance_flags) + len(overlay_entrance_regions)
+    total = pal_bytes + ent_bytes + base_bytes + blink_bytes + meta_bytes
 
     print(f"\nGenerated: {OUTPUT_FILE}")
     print(f"Palette: {PALETTE_SIZE} colors = {pal_bytes} bytes")
-    print(f"Entrance 4-bit: {len(ent0_packed)} + {len(ent1_packed)} = {ent_bytes} bytes")
+    for i, idx in enumerate(ENTRANCE_FRAME_INDICES):
+        mode = frame_info[idx]['mode']
+        if mode == 'full':
+            size = len(packed[('entrance_full', idx)])
+        else:
+            size = len(packed[('entrance_overlay', idx)])
+        print(f"Entrance {i} ({mode}): {size} bytes")
     print(f"Base 4-bit: {base_bytes} bytes")
-    print(f"Eyes 4-bit: {len(half_packed)} + {len(closed_packed)} = {eye_bytes} bytes")
+    print(f"Blink overlays: {blink_bytes} bytes")
+    print(f"Metadata: {meta_bytes} bytes")
     print(f"Total image data: {total} bytes")
+
+    # ========== Verification ==========
+    # Reconstruct frames from indexed data and compare with originals
+    print(f"\n--- Verification ---")
+
+    # Build RGB palette for reconstruction
+    palette_lut = np.array(quantized_palette_rgb, dtype=np.uint8)
+    def indexed_to_rgb(indexed_arr):
+        return palette_lut[indexed_arr]
+
+    verify_ok = True
+    verify_dir = os.path.join(SCRIPT_DIR, 'verify')
+    os.makedirs(verify_dir, exist_ok=True)
+
+    for frame_idx in ENTRANCE_FRAME_INDICES + BLINK_FRAME_INDICES:
+        # Reconstruct frame
+        if frame_idx in ENTRANCE_FRAME_INDICES:
+            if frame_info[frame_idx]['mode'] == 'full':
+                reconstructed = indexed_to_rgb(indexed_data[('entrance_full', frame_idx)])
+            else:
+                # Overlay on base
+                reconstructed = indexed_to_rgb(indexed_data[('base', BASE_FRAME_INDEX)]).copy()
+                x, y, w, h = frame_info[frame_idx]['region']
+                overlay_rgb = indexed_to_rgb(indexed_data[('entrance_overlay', frame_idx)])
+                reconstructed[y:y+h, x:x+w] = overlay_rgb
+        else:
+            # Blink: overlay on base
+            reconstructed = indexed_to_rgb(indexed_data[('base', BASE_FRAME_INDEX)]).copy()
+            overlay_rgb = indexed_to_rgb(indexed_data[('blink_overlay', frame_idx)])
+            reconstructed[EYE_Y:EYE_Y+EYE_H, EYE_X:EYE_X+EYE_W] = overlay_rgb
+
+        # Compare with original (after bg replacement)
+        original = frames[frame_idx]
+        diff = np.any(reconstructed != original, axis=2)
+        diff_count = diff.sum()
+
+        if diff_count > 0:
+            print(f"  Frame {frame_idx}: {diff_count} pixels differ (quantization)")
+            # Save diff image for inspection
+            diff_img = np.zeros_like(original)
+            diff_img[diff] = [255, 0, 0]  # red for differences
+            Image.fromarray(diff_img).save(os.path.join(verify_dir, f'diff_frame{frame_idx}.png'))
+            Image.fromarray(reconstructed).save(os.path.join(verify_dir, f'reconstructed_frame{frame_idx}.png'))
+            Image.fromarray(original).save(os.path.join(verify_dir, f'original_frame{frame_idx}.png'))
+        else:
+            print(f"  Frame {frame_idx}: OK (exact match)")
+
+    # Also verify base frame
+    base_reconstructed = indexed_to_rgb(indexed_data[('base', BASE_FRAME_INDEX)])
+    base_diff = np.any(base_reconstructed != frames[BASE_FRAME_INDEX], axis=2)
+    base_diff_count = base_diff.sum()
+    if base_diff_count > 0:
+        print(f"  Base frame: {base_diff_count} pixels differ (quantization)")
+        Image.fromarray(base_reconstructed).save(os.path.join(verify_dir, f'reconstructed_base.png'))
+        Image.fromarray(frames[BASE_FRAME_INDEX]).save(os.path.join(verify_dir, f'original_base.png'))
+    else:
+        print(f"  Base frame: OK (exact match)")
+
+    # Check specifically for white highlight preservation
+    white_original = np.all(frames[BASE_FRAME_INDEX] == [255, 255, 255], axis=2)
+    white_reconstructed = np.all(base_reconstructed == [255, 255, 255], axis=2)
+    lost_white = white_original & ~white_reconstructed
+    if lost_white.sum() > 0:
+        print(f"  WARNING: {lost_white.sum()} white highlight pixels lost in base frame!")
+        verify_ok = False
+    else:
+        gained = (~white_original & white_reconstructed).sum()
+        print(f"  White highlights: preserved ({white_original.sum()} px original, {white_reconstructed.sum()} px reconstructed)")
+
+    if verify_ok:
+        print("Verification PASSED")
+    else:
+        print("Verification FAILED - check verify/ directory")
 
 
 if __name__ == '__main__':

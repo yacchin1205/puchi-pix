@@ -89,7 +89,7 @@ static uint8_t entranceStep = 0;  // 0,1 = entrance frames, 2 = base (done)
 static uint8_t entranceOrient = 0; // 登場アニメの向き
 
 // Entrance frame data tables (4-bit packed, indexed by entranceStep)
-static const uint8_t* const entranceFrames[2] PROGMEM = { entranceFrame0, entranceFrame1 };
+static const uint8_t* const entranceFrames[3] PROGMEM = { entranceFrame0, entranceFrame1, entranceFrame2 };
 
 // ---------- KXTJ3 low-level ----------
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -447,18 +447,54 @@ static void drawBaseFrame(uint8_t orient) {
   drawBaseFrameRegion(orient, 0, 0, IMG_W, IMG_H);
 }
 
-// 登場フレーム描画 - 4-bit packed, 回転対応
+// 登場フレーム描画 - フル or オーバーレイ自動判定
 static void drawEntranceFrame(uint8_t frameIdx, uint8_t orient) {
   const uint8_t* frameData = (const uint8_t*)pgm_read_ptr(&entranceFrames[frameIdx]);
-  uint16_t screenX = getStartX(orient);
+  uint8_t isOverlay = pgm_read_byte(&entranceIsOverlay[frameIdx]);
 
-  for (uint8_t dy = 0; dy < IMG_H; dy++) {
-    tftSetAddrWindow(screenX, dy, screenX + IMG_W - 1, dy);
+  if (isOverlay) {
+    // まずベースフレームを描画、その上にオーバーレイ
+    drawBaseFrame(orient);
+    uint8_t ox = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 0]);
+    uint8_t oy = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 1]);
+    uint8_t ow = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 2]);
+    uint8_t oh = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 3]);
+    drawOverlayRegion(frameData, orient, ox, oy, ow, oh);
+  } else {
+    // フルフレーム描画
+    uint16_t screenX = getStartX(orient);
+    for (uint8_t dy = 0; dy < IMG_H; dy++) {
+      tftSetAddrWindow(screenX, dy, screenX + IMG_W - 1, dy);
+      dcData();
+      digitalWrite(TFT_CS, LOW);
+      for (uint8_t dx = 0; dx < IMG_W; dx++) {
+        uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
+        uint8_t idx = read4bit(frameData, srcIdx);
+        transferColor(pgm_read_word(&palette[idx]));
+      }
+      digitalWrite(TFT_CS, HIGH);
+    }
+  }
+}
+
+// 任意の矩形オーバーレイ領域を描画 (4-bit packed, 回転対応)
+static void drawOverlayRegion(const uint8_t* data, uint8_t orient,
+                               uint8_t srcX, uint8_t srcY, uint8_t srcW, uint8_t srcH) {
+  uint8_t dstX, dstY, dstW, dstH;
+  switch (orient) {
+    case 1:  dstX = 63 - (srcY + srcH - 1); dstY = srcX; dstW = srcH; dstH = srcW; break;
+    case 2:  dstX = srcY; dstY = 63 - (srcX + srcW - 1); dstW = srcH; dstH = srcW; break;
+    case 3:  dstX = 63 - (srcX + srcW - 1); dstY = 63 - (srcY + srcH - 1); dstW = srcW; dstH = srcH; break;
+    default: dstX = srcX; dstY = srcY; dstW = srcW; dstH = srcH; break;
+  }
+  uint16_t screenX = getStartX(orient) + dstX;
+  for (uint8_t dy = 0; dy < dstH; dy++) {
+    tftSetAddrWindow(screenX, dstY + dy, screenX + dstW - 1, dstY + dy);
     dcData();
     digitalWrite(TFT_CS, LOW);
-    for (uint8_t dx = 0; dx < IMG_W; dx++) {
-      uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
-      uint8_t idx = read4bit(frameData, srcIdx);
+    for (uint8_t dx = 0; dx < dstW; dx++) {
+      uint16_t srcIdx = getSrcIndex(dx, dy, orient, srcW, srcH);
+      uint8_t idx = read4bit(data, srcIdx);
       transferColor(pgm_read_word(&palette[idx]));
     }
     digitalWrite(TFT_CS, HIGH);
