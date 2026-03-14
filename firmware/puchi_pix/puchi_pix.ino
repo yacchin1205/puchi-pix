@@ -4,6 +4,12 @@
 #include <SPI.h>
 
 // =====================
+// 画像データ (アイコン差し替えはここだけ変更)
+// =====================
+#include "frame.h"
+#include "icon_IMG_1534.h"
+
+// =====================
 // ディスプレイ選択: いずれか1つをdefine (両方コメントアウトでST7735 TFT)
 // =====================
 // #define USE_SSD1351
@@ -73,33 +79,11 @@ static constexpr uint32_t KXTJ3_INT_PIN = PA_4;
 static constexpr uint32_t STAT_LED_PIN  = PA_8;
 #endif
 
-// =====================
-// 画像データ (64x64, entrance + blink animation)
-// =====================
-#include "image_data.h"
-static const uint8_t IMG_SCALE = 1;
-static const uint8_t IMG_FRAMES = 5;  // blink sequence: 0->1->2->1->0
-
-// Blink sequence: base -> half -> closed -> half -> base
-static const uint8_t blinkSequence[5] = { 0, 1, 2, 1, 0 };
-
-// Entrance animation state
-static bool entranceDone = false;
-static uint8_t entranceStep = 0;  // 0,1 = entrance frames, 2 = base (done)
-static uint8_t entranceOrient = 0; // 登場アニメの向き
-
-// Entrance frame data tables (4-bit packed, indexed by entranceStep)
-#if ENTRANCE_FRAMES > 0
-static const uint8_t* const entranceFrames[] PROGMEM = {
-  entranceFrame0
-#if ENTRANCE_FRAMES > 1
-  , entranceFrame1
-#endif
-#if ENTRANCE_FRAMES > 2
-  , entranceFrame2
-#endif
-};
-#endif
+// アニメーション状態
+static uint8_t  curFrame = 0;
+static int8_t   lastDrawnFrame = -1;
+static uint8_t  currentOrient = 0;
+static uint32_t lastFrameTime = 0;
 
 // ---------- KXTJ3 low-level ----------
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -392,10 +376,8 @@ static void tftFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t
 }
 #endif
 
-// ---------- 画像描画 (瞬きアニメーション対応) ----------
+// ---------- Frame描画 ----------
 // Orientation: 0=normal, 1=90°CW(左傾き), 2=90°CCW(右傾き), 3=180°(上傾き)
-static uint8_t currentOrient = 0;
-static int8_t lastDrawnFrame = -1;  // -1 = 未描画
 
 // 回転に応じた開始X座標
 static inline uint16_t getStartX(uint8_t orient) {
@@ -434,69 +416,30 @@ static inline void transferColor(uint16_t color) {
 #endif
 }
 
-// ベースフレームの指定領域を描画 (4-bit packed)
-static void drawBaseFrameRegion(uint8_t orient, uint8_t x, uint8_t y, uint8_t w, uint8_t h) {
-  uint16_t screenX = getStartX(orient) + x;
-  uint16_t screenY = y;
-
-  for (uint8_t dy = 0; dy < h; dy++) {
-    tftSetAddrWindow(screenX, screenY + dy, screenX + w - 1, screenY + dy);
+// フルフレーム描画
+static void drawFullFrame(const uint8_t* data, uint8_t orient) {
+  uint16_t screenX = getStartX(orient);
+  for (uint8_t dy = 0; dy < IMG_H; dy++) {
+    tftSetAddrWindow(screenX, dy, screenX + IMG_W - 1, dy);
     dcData();
     digitalWrite(TFT_CS, LOW);
-    for (uint8_t dx = 0; dx < w; dx++) {
-      uint16_t srcIdx = getSrcIndex(x + dx, y + dy, orient, IMG_W, IMG_H);
-      uint8_t idx = read4bit(baseFrame, srcIdx);
+    for (uint8_t dx = 0; dx < IMG_W; dx++) {
+      uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
+      uint8_t idx = read4bit(data, srcIdx);
       transferColor(pgm_read_word(&palette[idx]));
     }
     digitalWrite(TFT_CS, HIGH);
   }
 }
 
-// ベースフレーム全体を描画
-static void drawBaseFrame(uint8_t orient) {
-  drawBaseFrameRegion(orient, 0, 0, IMG_W, IMG_H);
-}
-
-// 登場フレーム描画 - フル or オーバーレイ自動判定
-#if ENTRANCE_FRAMES > 0
-static void drawEntranceFrame(uint8_t frameIdx, uint8_t orient) {
-  const uint8_t* frameData = (const uint8_t*)pgm_read_ptr(&entranceFrames[frameIdx]);
-  uint8_t isOverlay = pgm_read_byte(&entranceIsOverlay[frameIdx]);
-
-  if (isOverlay) {
-    // まずベースフレームを描画、その上にオーバーレイ
-    drawBaseFrame(orient);
-    uint8_t ox = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 0]);
-    uint8_t oy = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 1]);
-    uint8_t ow = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 2]);
-    uint8_t oh = pgm_read_byte(&entranceOverlayRegion[frameIdx * 4 + 3]);
-    drawOverlayRegion(frameData, orient, ox, oy, ow, oh);
-  } else {
-    // フルフレーム描画
-    uint16_t screenX = getStartX(orient);
-    for (uint8_t dy = 0; dy < IMG_H; dy++) {
-      tftSetAddrWindow(screenX, dy, screenX + IMG_W - 1, dy);
-      dcData();
-      digitalWrite(TFT_CS, LOW);
-      for (uint8_t dx = 0; dx < IMG_W; dx++) {
-        uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
-        uint8_t idx = read4bit(frameData, srcIdx);
-        transferColor(pgm_read_word(&palette[idx]));
-      }
-      digitalWrite(TFT_CS, HIGH);
-    }
-  }
-}
-#endif
-
-// 任意の矩形オーバーレイ領域を描画 (4-bit packed, 回転対応)
-static void drawOverlayRegion(const uint8_t* data, uint8_t orient,
-                               uint8_t srcX, uint8_t srcY, uint8_t srcW, uint8_t srcH) {
+// オーバーレイ領域描画 (overlay data は srcW x srcH ピクセル)
+static void drawOverlay(const uint8_t* data, uint8_t orient,
+                        uint8_t srcX, uint8_t srcY, uint8_t srcW, uint8_t srcH) {
   uint8_t dstX, dstY, dstW, dstH;
   switch (orient) {
-    case 1:  dstX = 63 - (srcY + srcH - 1); dstY = srcX; dstW = srcH; dstH = srcW; break;
-    case 2:  dstX = srcY; dstY = 63 - (srcX + srcW - 1); dstW = srcH; dstH = srcW; break;
-    case 3:  dstX = 63 - (srcX + srcW - 1); dstY = 63 - (srcY + srcH - 1); dstW = srcW; dstH = srcH; break;
+    case 1:  dstX = (IMG_H-1)-(srcY+srcH-1); dstY = srcX; dstW = srcH; dstH = srcW; break;
+    case 2:  dstX = srcY; dstY = (IMG_W-1)-(srcX+srcW-1); dstW = srcH; dstH = srcW; break;
+    case 3:  dstX = (IMG_W-1)-(srcX+srcW-1); dstY = (IMG_H-1)-(srcY+srcH-1); dstW = srcW; dstH = srcH; break;
     default: dstX = srcX; dstY = srcY; dstW = srcW; dstH = srcH; break;
   }
   uint16_t screenX = getStartX(orient) + dstX;
@@ -513,42 +456,28 @@ static void drawOverlayRegion(const uint8_t* data, uint8_t orient,
   }
 }
 
-// 目領域の描画先座標とサイズを取得
-static void getEyeImageRect(uint8_t orient, uint8_t& x, uint8_t& y, uint8_t& w, uint8_t& h) {
+// フルフレームから指定領域を描画 (ソース座標系)
+static void drawRegionFromFull(const uint8_t* fullData, uint8_t orient,
+                                uint8_t rx, uint8_t ry, uint8_t rw, uint8_t rh) {
+  uint8_t dstX, dstY, dstW, dstH;
   switch (orient) {
-    case 1:  x = 63 - (EYE_Y + EYE_H - 1); y = EYE_X; w = EYE_H; h = EYE_W; break;
-    case 2:  x = EYE_Y; y = 63 - (EYE_X + EYE_W - 1); w = EYE_H; h = EYE_W; break;
-    case 3:  x = 63 - (EYE_X + EYE_W - 1); y = 63 - (EYE_Y + EYE_H - 1); w = EYE_W; h = EYE_H; break;
-    default: x = EYE_X; y = EYE_Y; w = EYE_W; h = EYE_H; break;
+    case 1:  dstX = (IMG_H-1)-(ry+rh-1); dstY = rx; dstW = rh; dstH = rw; break;
+    case 2:  dstX = ry; dstY = (IMG_W-1)-(rx+rw-1); dstW = rh; dstH = rw; break;
+    case 3:  dstX = (IMG_W-1)-(rx+rw-1); dstY = (IMG_H-1)-(ry+rh-1); dstW = rw; dstH = rh; break;
+    default: dstX = rx; dstY = ry; dstW = rw; dstH = rh; break;
   }
-}
-
-
-// 目領域のみ描画 (4-bit packed, 共有palette)
-static void drawEyeRegion(uint8_t orient, const uint8_t* eyeData) {
-  uint8_t x, y, w, h;
-  getEyeImageRect(orient, x, y, w, h);
-  uint16_t screenX = getStartX(orient) + x;
-  uint16_t screenY = y;
-
-  for (uint8_t dy = 0; dy < h; dy++) {
-    tftSetAddrWindow(screenX, screenY + dy, screenX + w - 1, screenY + dy);
+  uint16_t screenX = getStartX(orient) + dstX;
+  for (uint8_t dy = 0; dy < dstH; dy++) {
+    tftSetAddrWindow(screenX, dstY + dy, screenX + dstW - 1, dstY + dy);
     dcData();
     digitalWrite(TFT_CS, LOW);
-    for (uint8_t dx = 0; dx < w; dx++) {
-      uint16_t srcIdx = getSrcIndex(dx, dy, orient, EYE_W, EYE_H);
-      uint8_t idx = read4bit(eyeData, srcIdx);
+    for (uint8_t dx = 0; dx < dstW; dx++) {
+      uint16_t srcIdx = getSrcIndex(dstX + dx, dstY + dy, orient, IMG_W, IMG_H);
+      uint8_t idx = read4bit(fullData, srcIdx);
       transferColor(pgm_read_word(&palette[idx]));
     }
     digitalWrite(TFT_CS, HIGH);
   }
-}
-
-// ベース画像の目領域を復元
-static void restoreBaseEyeRegion(uint8_t orient) {
-  uint8_t x, y, w, h;
-  getEyeImageRect(orient, x, y, w, h);
-  drawBaseFrameRegion(orient, x, y, w, h);
 }
 
 // 余白を黒で塗りつぶす
@@ -579,31 +508,82 @@ static void clearMargins(uint8_t orient) {
   }
 }
 
-// フレーム描画: blinkState 0=目開き, 1=半目, 2=閉じ
-static void drawFrame(uint8_t seqIdx, uint8_t orient) {
-  uint8_t blinkState = blinkSequence[seqIdx];
+// 現在のフルフレームデータを取得 (overlay→ref辿り)
+static const uint8_t* getActiveFullFrameData(uint8_t frameIdx) {
+  uint8_t ftype = pgm_read_byte(&frames[frameIdx].type);
+  if (ftype == 0) return (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
+  uint8_t ref = pgm_read_byte(&frames[frameIdx].ref);
+  return (const uint8_t*)pgm_read_ptr(&frames[ref].data);
+}
+
+// 統合描画 (type判定、ref参照、差分最適化)
+static void drawCurrentFrame(uint8_t frameIdx, uint8_t orient) {
+  uint8_t curType = pgm_read_byte(&frames[frameIdx].type);
+  const uint8_t* curData = (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
 
   if (lastDrawnFrame < 0 || orient != currentOrient) {
     clearMargins(orient);
-    drawBaseFrame(orient);
     currentOrient = orient;
+    if (curType == 0) {
+      drawFullFrame(curData, orient);
+    } else {
+      uint8_t curRef = pgm_read_byte(&frames[frameIdx].ref);
+      drawFullFrame((const uint8_t*)pgm_read_ptr(&frames[curRef].data), orient);
+      drawOverlay(curData, orient,
+        pgm_read_byte(&frames[frameIdx].rx), pgm_read_byte(&frames[frameIdx].ry),
+        pgm_read_byte(&frames[frameIdx].rw), pgm_read_byte(&frames[frameIdx].rh));
+    }
+    lastDrawnFrame = frameIdx;
+    return;
   }
 
   // TODO: これがないと青い線が出る。原因未解明
   clearMargins(orient);
 
-  if (blinkState == 0) {
-    restoreBaseEyeRegion(orient);
-  } else if (blinkState == 1) {
-    drawEyeRegion(orient, eyeHalf);
+  if ((uint8_t)lastDrawnFrame == frameIdx) return;
+
+  uint8_t prevIdx = (uint8_t)lastDrawnFrame;
+  uint8_t prevType = pgm_read_byte(&frames[prevIdx].type);
+
+  if (curType == 0) {
+    // フル←オーバーレイ: overlay領域だけ復元
+    if (prevType == 1 && pgm_read_byte(&frames[prevIdx].ref) == frameIdx) {
+      drawRegionFromFull(curData, orient,
+        pgm_read_byte(&frames[prevIdx].rx), pgm_read_byte(&frames[prevIdx].ry),
+        pgm_read_byte(&frames[prevIdx].rw), pgm_read_byte(&frames[prevIdx].rh));
+    } else {
+      drawFullFrame(curData, orient);
+    }
   } else {
-    drawEyeRegion(orient, eyeClosed);
+    uint8_t curRef = pgm_read_byte(&frames[frameIdx].ref);
+    uint8_t rx = pgm_read_byte(&frames[frameIdx].rx);
+    uint8_t ry = pgm_read_byte(&frames[frameIdx].ry);
+    uint8_t rw = pgm_read_byte(&frames[frameIdx].rw);
+    uint8_t rh = pgm_read_byte(&frames[frameIdx].rh);
+
+    if (prevType == 0 && curRef == prevIdx) {
+      // フル→その上にoverlay
+      drawOverlay(curData, orient, rx, ry, rw, rh);
+    } else if (prevType == 1 && pgm_read_byte(&frames[prevIdx].ref) == curRef) {
+      // overlay→同refの別overlay: 前のregionが違えば復元
+      uint8_t prevRx = pgm_read_byte(&frames[prevIdx].rx);
+      uint8_t prevRy = pgm_read_byte(&frames[prevIdx].ry);
+      uint8_t prevRw = pgm_read_byte(&frames[prevIdx].rw);
+      uint8_t prevRh = pgm_read_byte(&frames[prevIdx].rh);
+      if (prevRx != rx || prevRy != ry || prevRw != rw || prevRh != rh) {
+        drawRegionFromFull((const uint8_t*)pgm_read_ptr(&frames[curRef].data),
+          orient, prevRx, prevRy, prevRw, prevRh);
+      }
+      drawOverlay(curData, orient, rx, ry, rw, rh);
+    } else {
+      // 異なるコンテキスト: ref全描画+overlay
+      drawFullFrame((const uint8_t*)pgm_read_ptr(&frames[curRef].data), orient);
+      drawOverlay(curData, orient, rx, ry, rw, rh);
+    }
   }
 
-  lastDrawnFrame = seqIdx;
+  lastDrawnFrame = frameIdx;
 }
-
-static uint8_t currentFrame = 0;
 
 #if defined(USE_SSD1351) || defined(USE_SSD1331)
 // 全コントラスト設定 (SSD1331用)
@@ -633,11 +613,9 @@ static void fadeTransition(uint8_t newOrient) {
   oledInitRegisters();
   oledSetAllContrast(0, 0, 0, 0);
 
-  // 登場アニメをリセット (新しい向きで再生)
   currentOrient = newOrient;
-  entranceDone = false;
-  entranceStep = 0;
-  entranceOrient = newOrient;
+  curFrame = 0;
+  lastDrawnFrame = -1;
   tftFillScreen888(0, 0, 0);
 
   // フェードイン
@@ -845,9 +823,6 @@ static void calibrateKXTJ3(uint8_t samples=80) {
   calibrated = 1;
 }
 
-static uint32_t lastFrameTime = 0;
-static const uint32_t FRAME_INTERVAL_MS = 200;  // 200ms per frame
-
 // 加速度センサーから傾き方向を検出 (ヒステリシス付き)
 static uint8_t detectOrientation() {
   int16_t rx, ry, rz;
@@ -913,7 +888,8 @@ static void restorePixel(int16_t sx, int16_t sy) {
     uint8_t localX = sx - imgX;
     uint8_t localY = sy;
     uint16_t srcIdx = getSrcIndex(localX, localY, currentOrient, IMG_W, IMG_H);
-    uint8_t palIdx = read4bit(baseFrame, srcIdx);
+    const uint8_t* fullData = getActiveFullFrameData(curFrame);
+    uint8_t palIdx = read4bit(fullData, srcIdx);
     color = pgm_read_word(&palette[palIdx]);
   } else {
     color = 0x0000;  // 黒 (余白)
@@ -1027,12 +1003,11 @@ void setup() {
   digitalWrite(STAT_LED_PIN, LOW);
 #endif
 
-  // 登場アニメーションから開始
-  entranceDone = false;
-  entranceStep = 0;
-  entranceOrient = 0;
+  curFrame = 0;
+  lastDrawnFrame = -1;
   tftFillScreen888(0, 0, 0);
   lastActivityMs = millis();
+  lastFrameTime = millis();
 }
 
 void loop() {
@@ -1053,10 +1028,8 @@ void loop() {
     backlightFull();
     lastActivityMs = millis();
     lastFrameTime = millis();
-    lastDrawnFrame = -1;  // 再描画
-    entranceDone = false;  // 登場アニメ再生
-    entranceStep = 0;
-    entranceOrient = 0;
+    curFrame = 0;
+    lastDrawnFrame = -1;
     tftFillScreen888(0, 0, 0);
     return;
   }
@@ -1074,30 +1047,7 @@ void loop() {
 #endif
   }
 
-  // 登場アニメーション (entranceOrient の向きで描画)
-  if (!entranceDone) {
-    if (now - lastFrameTime >= ENTRANCE_INTERVAL_MS) {
-      lastFrameTime = now;
-      if (entranceStep < ENTRANCE_FRAMES) {
-#if ENTRANCE_FRAMES > 0
-        clearMargins(entranceOrient);
-        drawEntranceFrame(entranceStep, entranceOrient);
-        currentOrient = entranceOrient;
-#endif
-        entranceStep++;
-      } else {
-        // 登場完了 → ベースフレーム描画してまばたきループへ
-        drawBaseFrame(entranceOrient);
-        currentOrient = entranceOrient;
-        lastDrawnFrame = 0;
-        currentFrame = 0;
-        entranceDone = true;
-      }
-    }
-    return;
-  }
-
-  // 傾き検出と描画
+  // 傾き検出
   uint8_t orient = detectOrientation();
   if (orient != currentOrient) {
     lastActivityMs = now;
@@ -1111,92 +1061,18 @@ void loop() {
 #endif
   }
 
-  if (now - lastFrameTime >= FRAME_INTERVAL_MS) {
+  // フレーム進行
+  uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
+  if (now - lastFrameTime >= duration) {
     lastFrameTime = now;
-    currentFrame = (currentFrame + 1) % IMG_FRAMES;
-    drawFrame(currentFrame, orient);
+    curFrame = pgm_read_byte(&frames[curFrame].next);
+  }
+
+  // 描画 (変化がなければ内部で早期リターン)
+  if (lastDrawnFrame < 0 || (uint8_t)lastDrawnFrame != curFrame || orient != currentOrient) {
+    drawCurrentFrame(curFrame, orient);
   }
 
   // 上方向インジケーター
   drawUpIndicator();
-
-  /* ボールデモ用 (未使用)
-  uint32_t elapsed = millis() - lastActivityMs;
-
-  if (elapsed >= SLEEP_TIMEOUT_MS) {
-    backlightOff();
-    clearLatchedInterrupt();
-    HAL_SuspendTick();
-    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-    HAL_ResumeTick();
-    backlightFull();
-    lastActivityMs = millis();
-    return;
-  }
-
-  if (elapsed >= DIM_TIMEOUT_MS) {
-    backlightDim();
-  } else {
-    backlightFull();
-  }
-
-  int16_t rx, ry, rz;
-  if (!calibrated || !readXYZ_raw(rx, ry, rz)) return;
-
-  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
-  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
-
-  const float alpha = 0.20f;
-  fdx = (1.0f - alpha) * fdx + alpha * (float)dx;
-  fdy = (1.0f - alpha) * fdy + alpha * (float)dy;
-
-  const float dead = 5000.0f;
-  float ux = (fdx > -dead && fdx < dead) ? 0.0f : fdx;
-  float uy = (fdy > -dead && fdy < dead) ? 0.0f : fdy;
-
-  if (ux != 0.0f || uy != 0.0f) {
-    lastActivityMs = millis();
-  }
-
-  const float accel_gain = 0.0008f;
-  vel_x += ux * accel_gain;
-  vel_y += uy * accel_gain;
-
-  const float friction = 0.92f;
-  vel_x *= friction;
-  vel_y *= friction;
-
-  const float v_max = 3.0f;
-  vel_x = clampf(vel_x, -v_max, v_max);
-  vel_y = clampf(vel_y, -v_max, v_max);
-
-  pos_x += vel_x;
-  pos_y += vel_y;
-
-  const int r = 10;
-  const float x_min = r, y_min = r;
-  const float x_max = TFT_W - 1 - r;
-  const float y_max = TFT_H - 1 - r;
-
-  if (pos_x < x_min) { pos_x = x_min; vel_x = -vel_x; }
-  if (pos_x > x_max) { pos_x = x_max; vel_x = -vel_x; }
-  if (pos_y < y_min) { pos_y = y_min; vel_y = -vel_y; }
-  if (pos_y > y_max) { pos_y = y_max; vel_y = -vel_y; }
-
-  int cx = (int)(pos_x + 0.5f);
-  int cy = (int)(pos_y + 0.5f);
-
-  if (prev_cx > -1000) {
-    tftFillCircle888(prev_cx, prev_cy, r + 1, 0, 0, 0);
-  }
-
-  tftFillCircle888(cx, cy, r, 255, 0, 0);
-  int hr = (r/5) ? (r/5) : 1;
-  tftFillCircle888(cx - r/3, cy - r/3, hr, 255, 255, 255);
-
-  prev_cx = cx;
-  prev_cy = cy;
-
-  delay(30);
-  */
 }
