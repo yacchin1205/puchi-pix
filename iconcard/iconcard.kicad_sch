@@ -3756,12 +3756,12 @@
 		(uuid "1d249332-b318-4d7c-9da1-6980818f35f1")
 	)
 	(no_connect
-		(at 180.34 76.2)
-		(uuid "9e873797-acbd-4c7b-99bd-340422acfa67")
+		(at 231.14 86.36)
+		(uuid "34949fe4-d580-4355-a22b-fe0350586a2c")
 	)
 	(no_connect
-		(at 231.14 91.44)
-		(uuid "b375e1bd-7995-4d31-a1e9-c359bd0b1390")
+		(at 180.34 76.2)
+		(uuid "9e873797-acbd-4c7b-99bd-340422acfa67")
 	)
 	(no_connect
 		(at 180.34 86.36)
@@ -4637,7 +4637,7 @@
 	)
 	(wire
 		(pts
-			(xy 245.11 64.77) (xy 245.11 86.36)
+			(xy 245.11 64.77) (xy 245.11 91.44)
 		)
 		(stroke
 			(width 0)
@@ -4874,6 +4874,16 @@
 			(type default)
 		)
 		(uuid "b8432162-a72b-4bd4-91e6-f67c95f1d224")
+	)
+	(wire
+		(pts
+			(xy 245.11 91.44) (xy 231.14 91.44)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bb404302-6b4d-4bf1-a514-4ecb713d7194")
 	)
 	(wire
 		(pts
@@ -5154,16 +5164,6 @@
 			(type default)
 		)
 		(uuid "f1e6efa5-38a8-4661-a6d8-8a5777c263a6")
-	)
-	(wire
-		(pts
-			(xy 245.11 86.36) (xy 231.14 86.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f37d5c09-137a-429f-881c-d538bb3fdd24")
 	)
 	(wire
 		(pts
@@ -7187,7 +7187,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "2K"
+		(property "Value" "4.7K"
 			(at 247.65 62.2299 0)
 			(effects
 				(font

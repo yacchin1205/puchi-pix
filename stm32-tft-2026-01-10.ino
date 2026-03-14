@@ -69,6 +69,9 @@ static const uint8_t REG_WUTH_H     = 0x6A;
 static const uint8_t REG_WUTH_L     = 0x6B;
 
 static constexpr uint32_t KXTJ3_INT_PIN = PA_4;
+#if defined(USE_SSD1331) || defined(USE_SSD1351)
+static constexpr uint32_t STAT_LED_PIN  = PA_8;
+#endif
 
 // =====================
 // 画像データ (64x64, entrance + blink animation)
@@ -971,6 +974,11 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(KXTJ3_INT_PIN), wakeupCallback, FALLING);
 
+#if defined(USE_SSD1331) || defined(USE_SSD1351)
+  pinMode(STAT_LED_PIN, OUTPUT);
+  digitalWrite(STAT_LED_PIN, LOW);
+#endif
+
   // 登場アニメーションから開始
   entranceDone = false;
   entranceStep = 0;
@@ -985,6 +993,9 @@ void loop() {
 
   // スリープ
   if (elapsed >= SLEEP_TIMEOUT_MS) {
+#if defined(USE_SSD1331) || defined(USE_SSD1351)
+    digitalWrite(STAT_LED_PIN, LOW);
+#endif
     backlightOff();          // Display OFF + Power Save ON
     clearLatchedInterrupt();
     HAL_SuspendTick();
@@ -1005,8 +1016,14 @@ void loop() {
   // ディム
   if (elapsed >= DIM_TIMEOUT_MS) {
     backlightDim();
+#if defined(USE_SSD1331) || defined(USE_SSD1351)
+    digitalWrite(STAT_LED_PIN, LOW);
+#endif
   } else {
     backlightFull();
+#if defined(USE_SSD1331) || defined(USE_SSD1351)
+    digitalWrite(STAT_LED_PIN, HIGH);
+#endif
   }
 
   // 登場アニメーション (entranceOrient の向きで描画)
