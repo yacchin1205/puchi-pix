@@ -79,6 +79,17 @@ static constexpr uint32_t KXTJ3_INT_PIN = PA_4;
 static constexpr uint32_t STAT_LED_PIN  = PA_8;
 #endif
 
+// =====================
+// OLED 明度設定 (SSD1331/SSD1351共通)
+// =====================
+#if defined(USE_SSD1351) || defined(USE_SSD1331)
+static constexpr uint8_t OLED_MASTER_FULL    = 0x0A;  // Master Current (通常)
+static constexpr uint8_t OLED_MASTER_DIM     = 0x02;  // Master Current (ディム)
+static constexpr uint8_t OLED_CONTRAST_A     = 0x91;  // 個別コントラスト R
+static constexpr uint8_t OLED_CONTRAST_B     = 0x50;  // 個別コントラスト G
+static constexpr uint8_t OLED_CONTRAST_C     = 0x7D;  // 個別コントラスト B
+#endif
+
 // アニメーション状態
 static uint8_t  curFrame = 0;
 static int8_t   lastDrawnFrame = -1;
@@ -105,8 +116,8 @@ static void oledDisplayOn();
 static void oledDisplayOff();
 static void oledSetContrast(uint8_t level);
 
-static inline void backlightFull() { oledDisplayOn(); oledSetContrast(0x06); }
-static inline void backlightDim()  { oledSetContrast(0x01); }
+static inline void backlightFull() { oledDisplayOn(); oledSetContrast(OLED_MASTER_FULL); }
+static inline void backlightDim()  { oledSetContrast(OLED_MASTER_DIM); }
 static inline void backlightOff()  { oledDisplayOff(); }
 #else
 // TFT用: PWMバックライト
@@ -600,10 +611,10 @@ static void fadeTransition(uint8_t newOrient) {
 
   // フェードアウト
   for (int i = steps; i >= 0; i--) {
-    uint8_t a = (0x91 * i) / steps;
-    uint8_t b = (0x50 * i) / steps;
-    uint8_t c = (0x7D * i) / steps;
-    uint8_t m = (0x06 * i) / steps;
+    uint8_t a = (OLED_CONTRAST_A * i) / steps;
+    uint8_t b = (OLED_CONTRAST_B * i) / steps;
+    uint8_t c = (OLED_CONTRAST_C * i) / steps;
+    uint8_t m = (OLED_MASTER_FULL * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
@@ -620,13 +631,15 @@ static void fadeTransition(uint8_t newOrient) {
 
   // フェードイン
   for (int i = 0; i <= steps; i++) {
-    uint8_t a = (0x91 * i) / steps;
-    uint8_t b = (0x50 * i) / steps;
-    uint8_t c = (0x7D * i) / steps;
-    uint8_t m = (0x06 * i) / steps;
+    uint8_t a = (OLED_CONTRAST_A * i) / steps;
+    uint8_t b = (OLED_CONTRAST_B * i) / steps;
+    uint8_t c = (OLED_CONTRAST_C * i) / steps;
+    uint8_t m = (OLED_MASTER_FULL * i) / steps;
     oledSetAllContrast(a, b, c, m);
     delay(25);
   }
+
+  delay(250);  // 最初のフレームが見えるよう開始ディレイ
 }
 #endif
 
@@ -684,7 +697,7 @@ static void tftInit() {
 #elif defined(USE_SSD1331)
 static void oledDisplayOn() {
   tftWriteCommand(0xAF);                          // Display ON
-  tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current = 6 (restore)
+  tftWriteCommand(0x87); tftWriteCommand(OLED_MASTER_FULL);  // Master current (restore)
 }
 
 static void oledDisplayOff() {
@@ -724,10 +737,10 @@ static void oledInitRegisters() {
   tftWriteCommand(0x8C); tftWriteCommand(0x64);  // Precharge C
   tftWriteCommand(0xBB); tftWriteCommand(0x3A);  // Precharge level
   tftWriteCommand(0xBE); tftWriteCommand(0x3E);  // VCOMH
-  tftWriteCommand(0x87); tftWriteCommand(0x06);  // Master current
-  tftWriteCommand(0x81); tftWriteCommand(0x91);  // Contrast A
-  tftWriteCommand(0x82); tftWriteCommand(0x50);  // Contrast B
-  tftWriteCommand(0x83); tftWriteCommand(0x7D);  // Contrast C
+  tftWriteCommand(0x87); tftWriteCommand(OLED_MASTER_FULL);  // Master current
+  tftWriteCommand(0x81); tftWriteCommand(OLED_CONTRAST_A);  // Contrast A
+  tftWriteCommand(0x82); tftWriteCommand(OLED_CONTRAST_B);  // Contrast B
+  tftWriteCommand(0x83); tftWriteCommand(OLED_CONTRAST_C);  // Contrast C
   tftWriteCommand(0xAF);  // Display ON
   delay(100);
 }
@@ -1055,7 +1068,7 @@ void loop() {
     // Dim状態でなければフェードトランジション
     if (elapsed < DIM_TIMEOUT_MS) {
       fadeTransition(orient);
-      lastFrameTime = now;
+      lastFrameTime = millis();
       return;
     }
 #endif
