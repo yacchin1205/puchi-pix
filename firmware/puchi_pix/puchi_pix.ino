@@ -312,7 +312,7 @@ static void onOrientChange(uint8_t newOrient) {
 }
 
 // ---------- KXTJ3 ----------
-static bool readXYZ_raw(int16_t &x, int16_t &y, int16_t &z) {
+static bool readXYZRaw(int16_t &x, int16_t &y, int16_t &z) {
   Wire.beginTransmission(KXTJ3_ADDR);
   Wire.write(REG_XOUT_L);
   if (Wire.endTransmission(false) != 0) return false;
@@ -328,11 +328,11 @@ static bool readXYZ_raw(int16_t &x, int16_t &y, int16_t &z) {
 }
 
 // ---------- motion ----------
-static float pos_x=0, pos_y=0, vel_x=0, vel_y=0;
-static int16_t x_ref=0, y_ref=0, z_ref=0;
+static float posX=0, posY=0, velX=0, velY=0;
+static int16_t xRef=0, yRef=0, zRef=0;
 static uint8_t calibrated=0;
 static float fdx=0, fdy=0;
-static int prev_cx=-9999, prev_cy=-9999;
+static int prevCx=-9999, prevCy=-9999;
 
 static inline float clampf(float v, float lo, float hi) {
   return (v < lo) ? lo : (v > hi) ? hi : v;
@@ -343,23 +343,23 @@ static void calibrateKXTJ3(uint8_t samples=80) {
   uint8_t got=0;
   for (uint8_t i=0; i<samples; i++) {
     int16_t rx, ry, rz;
-    if (readXYZ_raw(rx, ry, rz)) { sx += rx; sy += ry; sz += rz; got++; }
+    if (readXYZRaw(rx, ry, rz)) { sx += rx; sy += ry; sz += rz; got++; }
     delay(10);
   }
   if (!got) return;
-  x_ref = (int16_t)(sx / got);
-  y_ref = (int16_t)(sy / got);
-  z_ref = (int16_t)(sz / got);
+  xRef = (int16_t)(sx / got);
+  yRef = (int16_t)(sy / got);
+  zRef = (int16_t)(sz / got);
   fdx = fdy = 0;
   calibrated = 1;
 }
 
 static uint8_t detectOrientation() {
   int16_t rx, ry, rz;
-  if (!calibrated || !readXYZ_raw(rx, ry, rz)) return currentOrient;
+  if (!calibrated || !readXYZRaw(rx, ry, rz)) return currentOrient;
 
-  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
-  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
+  int16_t dx = (xRef - rx) * ACCEL_X_SIGN;
+  int16_t dy = (ry - yRef) * ACCEL_Y_SIGN;
 
   const int16_t thresholdIn = 8000;
   const int16_t thresholdOut = 4000;
@@ -414,10 +414,10 @@ static void restorePixel(int16_t sx, int16_t sy) {
 
 static void drawUpIndicator() {
   int16_t rx, ry, rz;
-  if (!calibrated || !readXYZ_raw(rx, ry, rz)) return;
+  if (!calibrated || !readXYZRaw(rx, ry, rz)) return;
 
-  int16_t dx = (x_ref - rx) * ACCEL_X_SIGN;
-  int16_t dy = (ry - y_ref) * ACCEL_Y_SIGN;
+  int16_t dx = (xRef - rx) * ACCEL_X_SIGN;
+  int16_t dy = (ry - yRef) * ACCEL_Y_SIGN;
 
   const int16_t maxTilt = 8000;
   int16_t posX = DISPLAY_W / 2 - (dx * (DISPLAY_W / 2 - 4)) / maxTilt;
