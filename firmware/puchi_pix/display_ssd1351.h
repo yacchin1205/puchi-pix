@@ -130,16 +130,16 @@ static void displayBrightness(DisplayBright level) {
       cmdByte(0xAF);  // Display ON
       { uint8_t m[1] = { OLED_MASTER_FULL };
         cmdWithData(0xC7, m, 1); }
-      digitalWrite(STAT_LED_PIN, HIGH);
+      digitalWrite(STAT_LED_PIN, LOW);
       break;
     case BRIGHT_DIM:
       { uint8_t m[1] = { OLED_MASTER_DIM };
         cmdWithData(0xC7, m, 1); }
-      digitalWrite(STAT_LED_PIN, LOW);
+      digitalWrite(STAT_LED_PIN, HIGH);
       break;
     case BRIGHT_OFF:
       cmdByte(0xAE);  // Display OFF
-      digitalWrite(STAT_LED_PIN, LOW);
+      digitalWrite(STAT_LED_PIN, HIGH);
       delay(10);
       break;
   }
