@@ -42,9 +42,8 @@ static inline void cmdWithData(uint8_t cmd, const uint8_t* data, uint8_t n) {
 // =====================
 
 static inline void displayWritePixel(uint16_t rgb565) {
-  SPI.transfer((rgb565 >> 8) & 0xF8);
-  SPI.transfer((rgb565 >> 3) & 0xFC);
-  SPI.transfer((rgb565 << 3) & 0xF8);
+  SPI.transfer(rgb565 >> 8);
+  SPI.transfer(rgb565 & 0xFF);
 }
 
 static inline void displayBeginWrite(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
@@ -79,11 +78,10 @@ static inline void displayEndWrite() {
 }
 
 static void displayFillScreen(uint8_t r, uint8_t g, uint8_t b) {
+  uint16_t c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
   displayBeginWrite(0, 0, DISPLAY_W, DISPLAY_H);
   for (uint32_t i = 0; i < (uint32_t)DISPLAY_W * DISPLAY_H; i++) {
-    SPI.transfer(r);
-    SPI.transfer(g);
-    SPI.transfer(b);
+    displayWritePixel(c);
   }
   displayEndWrite();
 }
@@ -94,12 +92,9 @@ static void displayHLine(int x, int y, int w, uint8_t r, uint8_t g, uint8_t b) {
   if (x + w > DISPLAY_W) w = DISPLAY_W - x;
   if (w <= 0) return;
 
+  uint16_t c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
   displayBeginWrite((uint16_t)x, (uint16_t)y, (uint16_t)w, 1);
-  while (w--) {
-    SPI.transfer(r);
-    SPI.transfer(g);
-    SPI.transfer(b);
-  }
+  while (w--) displayWritePixel(c);
   displayEndWrite();
 }
 
@@ -132,7 +127,7 @@ static void displayInit() {
 
   cmdWithData(0x01, nullptr, 0); delay(150);  // SWRESET
   cmdWithData(0x11, nullptr, 0); delay(150);  // SLPOUT
-  { const uint8_t d[] = { 0x06 }; cmdWithData(0x3A, d, 1); } delay(10);
+  { const uint8_t d[] = { 0x05 }; cmdWithData(0x3A, d, 1); } delay(10);  // RGB565
   { const uint8_t d[] = { 0x00 }; cmdWithData(0x36, d, 1); } delay(10);
   cmdWithData(0x20, nullptr, 0); delay(10);   // INVOFF
   cmdWithData(0x13, nullptr, 0); delay(10);   // NORON

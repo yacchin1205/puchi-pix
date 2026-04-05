@@ -252,9 +252,6 @@ static void drawCurrentFrame(uint8_t frameIdx, uint8_t orient) {
     return;
   }
 
-  // TODO: これがないと青い線が出る。原因未解明
-  clearMargins(orient);
-
   if ((uint8_t)lastDrawnFrame == frameIdx) return;
 
   uint8_t prevIdx = (uint8_t)lastDrawnFrame;
