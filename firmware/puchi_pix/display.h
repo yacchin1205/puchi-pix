@@ -21,10 +21,12 @@
 #include <SPI.h>
 
 // =====================
-// ディスプレイ選択: いずれか1つをdefine (両方コメントアウトでST7735 TFT)
+// ディスプレイ選択: いずれか1つをdefine
 // =====================
 // #define USE_SSD1351
 #define USE_SSD1331
+// #define USE_GC9A01
+// #define USE_ST7735
 
 // 輝度レベル
 enum DisplayBright : uint8_t {
@@ -40,6 +42,10 @@ enum DisplayBright : uint8_t {
   #include "display_ssd1351.h"
 #elif defined(USE_SSD1331)
   #include "display_ssd1331.h"
-#else
+#elif defined(USE_GC9A01)
+  #include "display_gc9a01.h"
+#elif defined(USE_ST7735)
   #include "display_st7735.h"
+#else
+  #error "No display selected. Define one of: USE_SSD1351, USE_SSD1331, USE_GC9A01, USE_ST7735"
 #endif
