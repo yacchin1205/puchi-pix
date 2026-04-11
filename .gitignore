@@ -2,3 +2,4 @@
 .python-version
 resources/verify/
 firmware/puchi_pix/icon_*.h
+*.blend1
