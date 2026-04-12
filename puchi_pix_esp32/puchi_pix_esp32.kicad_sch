@@ -8750,7 +8750,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C72041"
+		(property "LCSC" "C12624"
 			(at 20.32 121.92 90)
 			(effects
 				(font
@@ -10839,7 +10839,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "39"
+		(property "Value" "4.7k"
 			(at 22.86 113.0299 0)
 			(effects
 				(font
@@ -10875,7 +10875,7 @@
 				(hide yes)
 			)
 		)
-		(property "LCSC" "C25110"
+		(property "LCSC" "C25900"
 			(at 20.32 111.76 0)
 			(effects
 				(font
