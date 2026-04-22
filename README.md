@@ -6,6 +6,8 @@ A tiny pixel art display kit powered by STM32G030F6P, with a 96x64 OLED (SSD1331
 
 ## Concept
 
+<img src="resources/puchi-pix.png" alt="Puchi-Pix overview" />
+
 Puchi-Pix was born from a simple desire: to carry pixel art animations in your pocket.
 
 It pairs an STM32G030F6P with a small OLED, targeting a keychain-sized form factor. Rather than a coin cell with its tedious battery swaps, the board integrates a LiPo charger on-board — unusual for something this small, but essential for a device meant to live in your pocket. Exposed GPIO and an onboard accelerometer also make it a capable dev board.
