@@ -7,7 +7,7 @@
 // 画像データ (アイコン差し替えはここだけ変更)
 // =====================
 #include "frame.h"
-#include "icon_dotpict2.h"
+#include "icon_original.h"
 
 // =====================
 // ディスプレイ抽象化レイヤー

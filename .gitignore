@@ -2,4 +2,7 @@
 .python-version
 resources/verify/
 firmware/puchi_pix/icon_*.h
+!firmware/puchi_pix/icon_original.h
+puchi_pix_esp32/production/backups/
+puchi_pix_esp32/puchi_pix_esp32-backups/
 *.blend1
