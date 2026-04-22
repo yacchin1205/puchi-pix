@@ -352,9 +352,15 @@ static void displayOff() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, LOW);
   gpio_hold_en((gpio_num_t)TFT_BL);
-  gpio_deep_sleep_hold_en();
+
   cmdWithData(0x28, nullptr, 0);  // DISPOFF
   cmdWithData(0x10, nullptr, 0);  // SLPIN
+
+  // Hold RST asserted so the panel sits in reset (lower leakage than SLPIN)
+  digitalWrite(TFT_RST, LOW);
+  gpio_hold_en((gpio_num_t)TFT_RST);
+
+  gpio_deep_sleep_hold_en();
 }
 
 // ---- Timeouts ----
@@ -374,6 +380,9 @@ static uint32_t lastOrientChangeMs = 0;
 static int8_t pendingOrient = -1;
 
 void setup() {
+  // Release any hold left by the previous deep-sleep cycle
+  gpio_hold_dis((gpio_num_t)TFT_RST);
+
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
   pinMode(TFT_RST, OUTPUT);
