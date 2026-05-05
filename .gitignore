@@ -8,3 +8,4 @@ puchi_pix_esp32/puchi_pix_esp32-backups/
 *.blend1
 box/*.stl
 box/*.3mf
+*.kicad_prl
