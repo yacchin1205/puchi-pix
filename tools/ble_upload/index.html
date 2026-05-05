@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>puchi-pix BLE upload</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      max-width: 760px;
+      margin: 2em auto;
+      padding: 0 1em;
+      color: #222;
+    }
+    h1 { font-size: 1.4em; }
+    canvas {
+      border: 1px solid #ccc;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: #000;
+    }
+    button {
+      padding: 0.5em 1.2em;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button:disabled { cursor: not-allowed; opacity: 0.5; }
+    .row {
+      display: flex;
+      gap: 1em;
+      align-items: center;
+      flex-wrap: wrap;
+      margin: 1em 0;
+    }
+    .panel { display: flex; gap: 1.5em; flex-wrap: wrap; }
+    .panel > div p { margin: 0 0 0.4em 0; font-size: 12px; color: #666; }
+    #log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      background: #f4f4f4;
+      padding: 0.8em;
+      height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    .pill {
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 12px;
+      background: #eee;
+    }
+    .pill.connected { background: #c7e8d0; }
+    .pill.error { background: #f5c6c6; }
+    .warn {
+      background: #fff3c4;
+      padding: 0.8em;
+      border-radius: 4px;
+      margin-bottom: 1em;
+    }
+  </style>
+</head>
+<body>
+  <h1>puchi-pix BLE upload</h1>
+
+  <div class="row">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span id="conn-status" class="pill">未接続</span>
+    <span id="upload-status" class="pill">idle</span>
+  </div>
+
+  <div class="row">
+    <input type="file" id="file" accept="image/gif">
+    <button id="upload" disabled>Upload</button>
+    <button id="revert" disabled>Revert to default</button>
+  </div>
+
+  <div class="panel">
+    <div>
+      <p>Original (1st frame)</p>
+      <canvas id="orig" width="128" height="128"></canvas>
+    </div>
+    <div>
+      <p>Quantized 64×64 (1st frame preview)</p>
+      <canvas id="prev" width="128" height="128"></canvas>
+    </div>
+  </div>
+
+  <div id="log"></div>
+
+  <script type="module">
+    import { parseGIF, decompressFrames } from 'https://esm.sh/gifuct-js@2.1.2';
+
+    // ---- BLE UUIDs (must match firmware) ----
+    const SERVICE = '5550eec9-b00f-4444-9876-ab12cd34ef01';
+    const UPLOAD  = '5550eec9-b00f-4444-9876-ab12cd34ef02';
+    const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
+    const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
+
+    // ---- Image format constants (must match firmware) ----
+    const MAX_FRAMES  = 16;
+    const IMG_W = 64, IMG_H = 64;
+    const FRAME_BYTES = IMG_W * IMG_H / 2;  // 2048
+    const FRAME_REC   = FRAME_BYTES + 2;    // + uint16 duration
+    const CHUNK_SIZE  = 200;                 // BLE write chunk
+
+    // ---- DOM ----
+    const $ = id => document.getElementById(id);
+    const log = (...args) => {
+      $('log').textContent += args.join(' ') + '\n';
+      $('log').scrollTop = $('log').scrollHeight;
+    };
+    const setConnStatus = (s, cls = '') => {
+      const el = $('conn-status');
+      el.textContent = s;
+      el.className = 'pill ' + cls;
+    };
+    const setUploadStatus = (s, cls = '') => {
+      const el = $('upload-status');
+      el.textContent = s;
+      el.className = 'pill ' + cls;
+    };
+
+    if (!navigator.bluetooth) {
+      document.body.insertAdjacentHTML('afterbegin',
+        '<div class="warn">このブラウザでは Web Bluetooth が使えません。Chrome / Edge / Brave などをお試しください。HTTPS か localhost で開く必要があります。</div>');
+    }
+
+    // ---- BLE state ----
+    let device, server, uploadChar, commitChar, statusChar;
+    let payload = null;
+
+    // ---- Connect ----
+    $('connect').addEventListener('click', async () => {
+      try {
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: 'puchi-pix' }],
+          optionalServices: [SERVICE]
+        });
+        log('connecting to', device.name);
+        device.addEventListener('gattserverdisconnected', () => {
+          setConnStatus('切断');
+          $('upload').disabled = true;
+          $('revert').disabled = true;
+          $('disconnect').disabled = true;
+          log('disconnected');
+        });
+        server = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE);
+        uploadChar = await service.getCharacteristic(UPLOAD);
+        commitChar = await service.getCharacteristic(COMMIT);
+        statusChar = await service.getCharacteristic(STATUS);
+        await statusChar.startNotifications();
+        statusChar.addEventListener('characteristicvaluechanged', (e) => {
+          const v = e.target.value.getUint8(0);
+          const names = ['idle', 'receiving', 'success', 'error'];
+          const cls = v === 2 ? 'connected' : (v === 3 ? 'error' : '');
+          setUploadStatus(names[v] ?? `code ${v}`, cls);
+          log('status:', names[v] ?? v);
+        });
+        setConnStatus('接続中', 'connected');
+        $('upload').disabled = (payload === null);
+        $('revert').disabled = false;
+        $('disconnect').disabled = false;
+        log('connected');
+      } catch (e) {
+        log('connect error:', e.message);
+        setConnStatus('エラー', 'error');
+      }
+    });
+
+    // ---- File pick ----
+    $('file').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      log(`parsing GIF: ${file.name} (${file.size} bytes)`);
+      try {
+        const buf = await file.arrayBuffer();
+        const parsed = parseGIF(buf);
+        const frames = decompressFrames(parsed, true);
+        log(`${frames.length} frame(s), canvas ${parsed.lsd.width}x${parsed.lsd.height}`);
+        payload = await buildPayload(parsed, frames);
+        log(`payload built: ${payload.length} bytes (${payload[3]} frames)`);
+        if (server && server.connected) $('upload').disabled = false;
+      } catch (err) {
+        log('parse error:', err.message);
+        payload = null;
+      }
+    });
+
+    // ---- Upload ----
+    $('upload').addEventListener('click', async () => {
+      if (!payload || !uploadChar || !commitChar) return;
+      $('upload').disabled = true;
+      try {
+        log('reset...');
+        await commitChar.writeValueWithResponse(new Uint8Array([0x02]));
+        const t0 = performance.now();
+        const total = payload.length;
+        for (let i = 0; i < total; i += CHUNK_SIZE) {
+          const slice = payload.slice(i, Math.min(i + CHUNK_SIZE, total));
+          await uploadChar.writeValueWithResponse(slice);
+          if ((i / CHUNK_SIZE) % 16 === 0) {
+            log(`  ${i}/${total} (${Math.round(i / total * 100)}%)`);
+          }
+        }
+        const t1 = performance.now();
+        log(`uploaded in ${((t1 - t0) / 1000).toFixed(2)}s, committing`);
+        await commitChar.writeValueWithResponse(new Uint8Array([0x01]));
+      } catch (e) {
+        log('upload error:', e.message);
+      } finally {
+        $('upload').disabled = false;
+      }
+    });
+
+    // ---- Disconnect ----
+    $('disconnect').addEventListener('click', () => {
+      if (device && device.gatt.connected) {
+        log('disconnecting...');
+        device.gatt.disconnect();
+      }
+    });
+
+    // ---- Revert ----
+    $('revert').addEventListener('click', async () => {
+      if (!commitChar) return;
+      log('revert to default');
+      try {
+        await commitChar.writeValueWithResponse(new Uint8Array([0x03]));
+      } catch (e) {
+        log('revert error:', e.message);
+      }
+    });
+
+    // ---- GIF -> payload pipeline ----
+
+    async function buildPayload(parsed, frames) {
+      const W = parsed.lsd.width, H = parsed.lsd.height;
+
+      // Composite each frame onto a full-size canvas (handles patches/dirty rects)
+      const canvas = document.createElement('canvas');
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+
+      const composed = [];
+      for (const f of frames) {
+        const patchCanvas = document.createElement('canvas');
+        patchCanvas.width = f.dims.width;
+        patchCanvas.height = f.dims.height;
+        const pctx = patchCanvas.getContext('2d');
+        const id = pctx.createImageData(f.dims.width, f.dims.height);
+        id.data.set(f.patch);
+        pctx.putImageData(id, 0, 0);
+        ctx.drawImage(patchCanvas, f.dims.left, f.dims.top);
+        composed.push({
+          delay: f.delay,
+          imageData: ctx.getImageData(0, 0, W, H)
+        });
+        // Naive disposal: simulate disposal=2 (clear to bg) by clearing each iteration?
+        // No - keep canvas for next frame (simulate disposal=1, leave). Most GIFs assume this.
+      }
+
+      // Show original (1st frame composited)
+      drawCanvasTo($('orig'), composed[0].imageData);
+
+      // Limit and resize to 64x64
+      const slice = composed.slice(0, MAX_FRAMES);
+      const resized = slice.map(c => resizeImageData(c.imageData, IMG_W, IMG_H));
+
+      // Use exact source palette if input already <=16 unique colors, else median cut
+      const palette = buildPalette(resized, 16);
+
+      // Quantize each frame and 4-bit pack
+      const packed = resized.map(rgba => quantizeAndPack(rgba, palette));
+
+      // Render preview of 1st packed frame
+      drawPackedTo($('prev'), packed[0], palette);
+
+      // Assemble payload
+      const N = slice.length;
+      const total = 4 + 32 + N * FRAME_REC;
+      const out = new Uint8Array(total);
+      out[0] = 0x50; // 'P'
+      out[1] = 0x50; // 'P'
+      out[2] = 1;    // version
+      out[3] = N;    // frame count
+      for (let i = 0; i < 16; i++) {
+        const [r, g, b] = palette[i];
+        const c565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        out[4 + i * 2]     = c565 & 0xFF;
+        out[4 + i * 2 + 1] = (c565 >> 8) & 0xFF;
+      }
+      for (let i = 0; i < N; i++) {
+        const off = 4 + 32 + i * FRAME_REC;
+        // gifuct-js delay is already in milliseconds. Clamp / fallback for
+        // GIFs that report 0 or absurdly large.
+        let dur = slice[i].delay | 0;
+        if (dur < 20) dur = 100;
+        if (dur > 65535) dur = 65535;
+        out[off + 0] = dur & 0xFF;
+        out[off + 1] = (dur >> 8) & 0xFF;
+        out.set(packed[i], off + 2);
+      }
+      return out;
+    }
+
+    function resizeImageData(imageData, w, h) {
+      const src = document.createElement('canvas');
+      src.width = imageData.width;
+      src.height = imageData.height;
+      src.getContext('2d').putImageData(imageData, 0, 0);
+
+      const dst = document.createElement('canvas');
+      dst.width = w; dst.height = h;
+      const dctx = dst.getContext('2d');
+      dctx.imageSmoothingEnabled = false;
+      dctx.drawImage(src, 0, 0, w, h);
+      return dctx.getImageData(0, 0, w, h).data;
+    }
+
+    function buildPalette(rgbaFrames, K) {
+      // If the input has <=K distinct RGB colors, use them directly (no
+      // averaging-induced color drift). Otherwise fall back to median cut.
+      const seen = new Map();
+      let exceeded = false;
+      outer: for (const rgba of rgbaFrames) {
+        for (let i = 0; i < rgba.length; i += 4) {
+          const key = (rgba[i] << 16) | (rgba[i + 1] << 8) | rgba[i + 2];
+          if (!seen.has(key)) {
+            seen.set(key, [rgba[i], rgba[i + 1], rgba[i + 2]]);
+            if (seen.size > K) { exceeded = true; break outer; }
+          }
+        }
+      }
+      if (!exceeded) {
+        const pal = [...seen.values()];
+        while (pal.length < K) pal.push([0, 0, 0]);  // pad unused slots
+        return pal;
+      }
+      return medianCutPalette(rgbaFrames, K);
+    }
+
+    function medianCutPalette(rgbaFrames, K) {
+      // Collect every pixel from every frame as RGB triples
+      const total = rgbaFrames.reduce((a, b) => a + b.length / 4, 0);
+      const pixels = new Array(total);
+      let p = 0;
+      for (const rgba of rgbaFrames) {
+        for (let i = 0; i < rgba.length; i += 4) {
+          pixels[p++] = [rgba[i], rgba[i + 1], rgba[i + 2]];
+        }
+      }
+      let boxes = [pixels];
+      while (boxes.length < K) {
+        let bestIdx = -1, bestRange = -1, bestAxis = 0;
+        for (let i = 0; i < boxes.length; i++) {
+          const b = boxes[i];
+          if (b.length < 2) continue;
+          for (let a = 0; a < 3; a++) {
+            let mn = 255, mx = 0;
+            for (const px of b) {
+              if (px[a] < mn) mn = px[a];
+              if (px[a] > mx) mx = px[a];
+            }
+            const r = mx - mn;
+            if (r > bestRange) { bestRange = r; bestIdx = i; bestAxis = a; }
+          }
+        }
+        if (bestIdx === -1 || bestRange <= 0) break;
+        const b = boxes[bestIdx];
+        b.sort((p, q) => p[bestAxis] - q[bestAxis]);
+        const mid = Math.floor(b.length / 2);
+        boxes.splice(bestIdx, 1, b.slice(0, mid), b.slice(mid));
+      }
+      while (boxes.length < K) boxes.push([[0, 0, 0]]);
+      return boxes.map(b => {
+        let r = 0, g = 0, bb = 0;
+        for (const px of b) { r += px[0]; g += px[1]; bb += px[2]; }
+        const n = b.length || 1;
+        return [Math.round(r / n), Math.round(g / n), Math.round(bb / n)];
+      });
+    }
+
+    function quantizeAndPack(rgba, palette) {
+      // RGB565 quantization: snap palette to RGB565 first, then map source to nearest
+      const pal565 = palette.map(([r, g, b]) => {
+        const r5 = (r >> 3) & 0x1F, g6 = (g >> 2) & 0x3F, b5 = (b >> 3) & 0x1F;
+        return [
+          (r5 << 3) | (r5 >> 2),
+          (g6 << 2) | (g6 >> 4),
+          (b5 << 3) | (b5 >> 2)
+        ];
+      });
+      const out = new Uint8Array(IMG_W * IMG_H / 2);
+      for (let i = 0; i < IMG_W * IMG_H; i++) {
+        const r = rgba[i * 4 + 0];
+        const g = rgba[i * 4 + 1];
+        const b = rgba[i * 4 + 2];
+        let bestIdx = 0, bestDist = Infinity;
+        for (let p = 0; p < 16; p++) {
+          const dr = r - pal565[p][0];
+          const dg = g - pal565[p][1];
+          const db = b - pal565[p][2];
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bestDist) { bestDist = d; bestIdx = p; }
+        }
+        const byteIdx = i >> 1;
+        if (i & 1) out[byteIdx] = (out[byteIdx] & 0xF0) | (bestIdx & 0x0F);
+        else       out[byteIdx] = (out[byteIdx] & 0x0F) | ((bestIdx & 0x0F) << 4);
+      }
+      return out;
+    }
+
+    function drawCanvasTo(targetCanvas, imageData) {
+      const ctx = targetCanvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      const tmp = document.createElement('canvas');
+      tmp.width = imageData.width;
+      tmp.height = imageData.height;
+      tmp.getContext('2d').putImageData(imageData, 0, 0);
+      ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+      ctx.drawImage(tmp, 0, 0, targetCanvas.width, targetCanvas.height);
+    }
+
+    function drawPackedTo(targetCanvas, packed, palette) {
+      const tmp = document.createElement('canvas');
+      tmp.width = IMG_W; tmp.height = IMG_H;
+      const tctx = tmp.getContext('2d');
+      const id = tctx.createImageData(IMG_W, IMG_H);
+      for (let i = 0; i < IMG_W * IMG_H; i++) {
+        const byte = packed[i >> 1];
+        const palIdx = (i & 1) ? (byte & 0x0F) : (byte >> 4);
+        const [r, g, b] = palette[palIdx];
+        id.data[i * 4 + 0] = r;
+        id.data[i * 4 + 1] = g;
+        id.data[i * 4 + 2] = b;
+        id.data[i * 4 + 3] = 255;
+      }
+      tctx.putImageData(id, 0, 0);
+      const ctx = targetCanvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+      ctx.drawImage(tmp, 0, 0, targetCanvas.width, targetCanvas.height);
+    }
+  </script>
+</body>
+</html>
