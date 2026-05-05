@@ -6,3 +6,5 @@ firmware/puchi_pix/icon_*.h
 puchi_pix_esp32/production/backups/
 puchi_pix_esp32/puchi_pix_esp32-backups/
 *.blend1
+box/*.stl
+box/*.3mf
