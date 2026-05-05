@@ -22,7 +22,10 @@ static constexpr int HEIGHT = 240;
 
 // ---- Image data ----
 #include "../puchi_pix/frame.h"
-#include "../puchi_pix/icon_dotpict2.h"
+#include "../puchi_pix/icon_original.h"
+
+// Pixel scale factor: 64x64 source -> 192x192 on screen
+static constexpr uint8_t SCALE = 3;
 
 // ---- SPI helpers ----
 
@@ -158,11 +161,20 @@ static void composeFrame(uint8_t frameIdx, uint16_t* buf) {
 }
 
 static void drawFrame(const uint16_t* buf) {
-  uint16_t ox = (WIDTH - IMG_W) / 2;
-  uint16_t oy = (HEIGHT - IMG_H) / 2;
-  setWindow(ox, oy, ox + IMG_W - 1, oy + IMG_H - 1);
-  for (uint16_t i = 0; i < IMG_W * IMG_H; i++)
-    writePixel(buf[i]);
+  const uint16_t scaledW = (uint16_t)IMG_W * SCALE;
+  const uint16_t scaledH = (uint16_t)IMG_H * SCALE;
+  uint16_t ox = (WIDTH - scaledW) / 2;
+  uint16_t oy = (HEIGHT - scaledH) / 2;
+  setWindow(ox, oy, ox + scaledW - 1, oy + scaledH - 1);
+  for (uint8_t y = 0; y < IMG_H; y++) {
+    const uint16_t* row = &buf[(uint16_t)y * IMG_W];
+    for (uint8_t r = 0; r < SCALE; r++) {
+      for (uint8_t x = 0; x < IMG_W; x++) {
+        uint16_t c = row[x];
+        for (uint8_t s = 0; s < SCALE; s++) writePixel(c);
+      }
+    }
+  }
   digitalWrite(TFT_CS, HIGH);
 }
 
