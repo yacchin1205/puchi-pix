@@ -160,19 +160,91 @@ static inline uint8_t read4bit(const uint8_t* data, uint16_t idx) {
   return (idx & 1) ? (b & 0x0F) : (b >> 4);
 }
 
-// Compose frame to 64x64 source-coord buffer (no rotation)
+// ---- Foil-stamp effect (gold) ----
+// Source-pixel palette index treated as gold foil. icon_original.h palette[5]
+// (orange 0xFC22) is the dominant character color.
+static constexpr uint8_t FOIL_IDX = 5;
+// Sign flips to align tilt vector with screen frame (chip vs. mounting).
+static constexpr int FOIL_TILT_X_SIGN = 1;
+static constexpr int FOIL_TILT_Y_SIGN = 1;
+// Highlight band base/peak/shadow colors (RGB565).
+static constexpr uint16_t FOIL_RGB_HIGHLIGHT = 0xFFDF;  // near-white cream
+static constexpr uint16_t FOIL_RGB_SHADOW    = 0x59A0;  // dark brown
+// Band position along tilt direction = (mag * K) >> SHIFT, in screen pixels.
+// K = px offset from icon center at full 1g sideways tilt. Icon visible radius
+// is 64 px (64×64 src × SCALE=2 / 2), so K=64 puts band right at icon edge at
+// 1g; smaller K keeps the band fully on-icon at strong tilts.
+static constexpr int32_t FOIL_BAND_K     = 64;
+static constexpr uint8_t FOIL_BAND_SHIFT = 14;
+// Below this magnitude squared, foil renders flat (no highlight band).
+// 4000^2 = 1.6e7 ≈ 0.25g of in-plane tilt.
+static constexpr int32_t FOIL_TILT_DEAD_ZONE_SQ = 16000000L;
+// Highlight half-width in screen pixels (full band ≈ 2 × this).
+static constexpr int32_t FOIL_HL_HALF_W = 8;
+// Shadow band: offset from highlight center along tilt axis (screen px).
+static constexpr int32_t FOIL_SHADOW_OFFSET = 32;
+static constexpr int32_t FOIL_SH_HALF_W     = 14;
+// Redraw trigger: tilt vector must shift by sqrt(this) raw counts.
+// 1000^2 = 1e6. Lower → smoother but more SPI churn.
+static constexpr int32_t FOIL_REDRAW_DELTA_SQ = 1000000L;
+
+// Set to 1 to lock icon orientation (no gravity-following rotation). Useful
+// for evaluating the foil effect on its own — the icon then behaves like a
+// physical sticker that tilts with the device.
+#define FOIL_NO_ROTATE 1
+
+// 1 bit per source pixel: set when source idx == FOIL_IDX. Built alongside
+// frameBuf in composeFrame, consumed in drawFrameRotated.
+static uint8_t foilMask[(IMG_W * IMG_H + 7) / 8];
+
+// Linear interpolation between two RGB565 values. t in 0..256 (256 = full b).
+static inline uint16_t lerpRgb565(uint16_t a, uint16_t b, int32_t t) {
+  int32_t ar = (a >> 11) & 0x1F, ag = (a >> 5) & 0x3F, ab = a & 0x1F;
+  int32_t br = (b >> 11) & 0x1F, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
+  int32_t r = ar + (((br - ar) * t) >> 8);
+  int32_t g = ag + (((bg - ag) * t) >> 8);
+  int32_t bv = ab + (((bb - ab) * t) >> 8);
+  return (uint16_t)((r << 11) | (g << 5) | bv);
+}
+
+// Bit-by-bit integer sqrt. Used once per redraw to normalize tilt vector.
+static int32_t isqrt32(uint32_t n) {
+  uint32_t res = 0;
+  uint32_t one = (uint32_t)1 << 30;
+  while (one > n) one >>= 2;
+  while (one) {
+    if (n >= res + one) {
+      n -= res + one;
+      res = (res >> 1) + one;
+    } else {
+      res >>= 1;
+    }
+    one >>= 2;
+  }
+  return (int32_t)res;
+}
+
+// Compose frame to 64x64 source-coord buffer (no rotation). Also rebuilds
+// foilMask in the same pass so palette-index info isn't redundantly walked.
 static void composeFrame(uint8_t frameIdx, uint16_t* buf) {
+  memset(foilMask, 0, sizeof(foilMask));
   uint8_t ftype = pgm_read_byte(&frames[frameIdx].type);
   const uint8_t* data = (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
 
   if (ftype == 0) {
-    for (uint16_t i = 0; i < IMG_W * IMG_H; i++)
-      buf[i] = pgm_read_word(&palette[read4bit(data, i)]);
+    for (uint16_t i = 0; i < IMG_W * IMG_H; i++) {
+      uint8_t idx = read4bit(data, i);
+      buf[i] = pgm_read_word(&palette[idx]);
+      if (idx == FOIL_IDX) foilMask[i >> 3] |= (1 << (i & 7));
+    }
   } else {
     uint8_t ref = pgm_read_byte(&frames[frameIdx].ref);
     const uint8_t* refData = (const uint8_t*)pgm_read_ptr(&frames[ref].data);
-    for (uint16_t i = 0; i < IMG_W * IMG_H; i++)
-      buf[i] = pgm_read_word(&palette[read4bit(refData, i)]);
+    for (uint16_t i = 0; i < IMG_W * IMG_H; i++) {
+      uint8_t idx = read4bit(refData, i);
+      buf[i] = pgm_read_word(&palette[idx]);
+      if (idx == FOIL_IDX) foilMask[i >> 3] |= (1 << (i & 7));
+    }
 
     uint8_t rx = pgm_read_byte(&frames[frameIdx].rx);
     uint8_t ry = pgm_read_byte(&frames[frameIdx].ry);
@@ -182,7 +254,10 @@ static void composeFrame(uint8_t frameIdx, uint16_t* buf) {
       for (uint8_t dx = 0; dx < rw; dx++) {
         uint16_t srcIdx = (uint16_t)dy * rw + dx;
         uint16_t dstIdx = (uint16_t)(ry + dy) * IMG_W + (rx + dx);
-        buf[dstIdx] = pgm_read_word(&palette[read4bit(data, srcIdx)]);
+        uint8_t idx = read4bit(data, srcIdx);
+        buf[dstIdx] = pgm_read_word(&palette[idx]);
+        if (idx == FOIL_IDX) foilMask[dstIdx >> 3] |=  (1 << (dstIdx & 7));
+        else                 foilMask[dstIdx >> 3] &= ~(1 << (dstIdx & 7));
       }
     }
   }
@@ -190,7 +265,10 @@ static void composeFrame(uint8_t frameIdx, uint16_t* buf) {
 
 // Reverse-rotate source buffer onto a centered OUT_SIZE x OUT_SIZE region.
 // bin in 0..63 selects the rotation angle (bin*5.625deg).
-static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
+// ftx/fty: tilt vector in screen frame (already sign-adjusted, raw counts).
+//          Used to drive the foil-stamp highlight band.
+static void drawFrameRotated(const uint16_t* src, const uint8_t* fmask,
+                             uint8_t bin, int32_t ftx, int32_t fty) {
   const int32_t cosT = COS64[bin & 0x3F];
   const int32_t sinT = SIN64[bin & 0x3F];
 
@@ -204,18 +282,49 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
   // Combined Q15 unscale + SCALE divide = >> (15 + SCALE_SHIFT)
   const int8_t SHIFT = 15 + SCALE_SHIFT;
 
+  // Foil shading parameters (screen frame). Disabled when in-plane gravity is
+  // below the dead zone — foil pixels then render flat at base palette color.
+  int32_t magSq = ftx * ftx + fty * fty;
+  bool foilOn = (magSq > FOIL_TILT_DEAD_ZONE_SQ);
+  int32_t uxQ10 = 0, uyQ10 = 0, bandCenterPx = 0;
+  if (foilOn) {
+    int32_t mag = isqrt32((uint32_t)magSq);
+    uxQ10 = (ftx << 10) / mag;
+    uyQ10 = (fty << 10) / mag;
+    bandCenterPx = (mag * FOIL_BAND_K) >> FOIL_BAND_SHIFT;
+  }
+
   for (int16_t oy = 0; oy < OUT_SIZE; oy++) {
     int32_t cy = oy - OUT_HALF;
-    // Per-row constants (cy*sinT, cy*cosT) hoisted out of inner loop
     int32_t cySin = cy * sinT;
     int32_t cyCos = cy * cosT;
+    int32_t cyUy = cy * uyQ10;  // hoisted projection partial
     for (int16_t ox = 0; ox < OUT_SIZE; ox++) {
       int32_t cx = ox - OUT_HALF;
       int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + SRC_HALF;
       int16_t sy = (int16_t)(((-cx * sinT) + cyCos) >> SHIFT) + SRC_HALF;
       uint16_t c;
       if ((uint16_t)sx < (uint16_t)IMG_W && (uint16_t)sy < (uint16_t)IMG_H) {
-        c = src[(uint16_t)sy * IMG_W + sx];
+        uint16_t srcIdxLin = (uint16_t)sy * IMG_W + sx;
+        c = src[srcIdxLin];
+        if (foilOn && (fmask[srcIdxLin >> 3] & (1 << (srcIdxLin & 7)))) {
+          // Project screen-centered (cx,cy) onto tilt direction; band sweeps
+          // along this axis as tilt magnitude grows.
+          int32_t projPx = ((cx * uxQ10) + cyUy) >> 10;
+          int32_t d = projPx - bandCenterPx;
+          int32_t adH = d < 0 ? -d : d;
+          if (adH < FOIL_HL_HALF_W) {
+            int32_t t = ((FOIL_HL_HALF_W - adH) << 8) / FOIL_HL_HALF_W;
+            c = lerpRgb565(c, FOIL_RGB_HIGHLIGHT, t);
+          } else {
+            int32_t dS = d + FOIL_SHADOW_OFFSET;
+            int32_t adS = dS < 0 ? -dS : dS;
+            if (adS < FOIL_SH_HALF_W) {
+              int32_t t = ((FOIL_SH_HALF_W - adS) << 8) / FOIL_SH_HALF_W;
+              c = lerpRgb565(c, FOIL_RGB_SHADOW, t);
+            }
+          }
+        }
       } else {
         c = 0x0000;
       }
@@ -368,6 +477,9 @@ static uint32_t lastFrameTime = 0;
 static uint16_t frameBuf[IMG_W * IMG_H];
 static int16_t xRef = 0, yRef = 0, zRef = 0;
 static int32_t fxLp = 0, fyLp = 0;
+// Last tilt-vector snapshot used for drawing. Compared against fxLp/fyLp every
+// loop; redraw triggers when delta^2 exceeds FOIL_REDRAW_DELTA_SQ.
+static int32_t lastDrawnFx = 0, lastDrawnFy = 0;
 
 // Argmax of dot product with 64 unit vectors, with proportional hysteresis.
 // Returns curBin unless another bin's score exceeds curBin's score by
@@ -436,7 +548,9 @@ void setup() {
   lastActivityMs = millis();
 
   composeFrame(curFrame, frameBuf);
-  drawFrameRotated(frameBuf, currentBin);
+  lastDrawnFx = fxLp * FOIL_TILT_X_SIGN;
+  lastDrawnFy = fyLp * FOIL_TILT_Y_SIGN;
+  drawFrameRotated(frameBuf, foilMask, currentBin, lastDrawnFx, lastDrawnFy);
 }
 
 void loop() {
@@ -460,6 +574,11 @@ void loop() {
     fyLp = (fyLp * ((1 << LP_SHIFT) - 1) + fy) >> LP_SHIFT;
   }
 
+#if FOIL_NO_ROTATE
+  // Rotation disabled: icon stays fixed in screen frame and tilts with device.
+  bool binChanged = false;
+  currentBin = 0;
+#else
   // Hysteretic bin update: only when in-plane gravity is strong enough.
   int32_t mag2 = fxLp * fxLp + fyLp * fyLp;
   if (mag2 > MAG2_MIN) {
@@ -475,6 +594,7 @@ void loop() {
     currentBin = newBin;
     lastActivityMs = now;
   }
+#endif
 
   // Frame advance
   uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
@@ -484,8 +604,21 @@ void loop() {
     curFrame = pgm_read_byte(&frames[curFrame].next);
   }
 
-  if (frameAdvance || binChanged) {
+  // Foil-driven redraw: trigger when tilt vector has shifted enough that the
+  // highlight band would have visibly moved since last draw.
+  int32_t ftx = fxLp * FOIL_TILT_X_SIGN;
+  int32_t fty = fyLp * FOIL_TILT_Y_SIGN;
+  int32_t dfx = ftx - lastDrawnFx;
+  int32_t dfy = fty - lastDrawnFy;
+  bool foilTiltChanged = (dfx * dfx + dfy * dfy > FOIL_REDRAW_DELTA_SQ);
+
+  if (frameAdvance) {
     composeFrame(curFrame, frameBuf);
-    drawFrameRotated(frameBuf, currentBin);
+  }
+  if (frameAdvance || binChanged || foilTiltChanged) {
+    lastDrawnFx = ftx;
+    lastDrawnFy = fty;
+    if (foilTiltChanged) lastActivityMs = now;
+    drawFrameRotated(frameBuf, foilMask, currentBin, ftx, fty);
   }
 }
