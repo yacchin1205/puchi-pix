@@ -6,7 +6,15 @@ Output format: Frame structure array with linked-list style next pointers.
 Each frame is either a full frame or an overlay on a reference frame.
 The .ino decides which frame to start at, where to loop, etc.
 
-Run: python3 resources/generate_image_data.py <gif_path> <config>
+Run: python3 resources/generate_image_data.py <gif_path> <config> [gamma] [sat_power]
+
+gamma (optional, default 1.0): applied to the output palette only.
+  OLED panels drive pixels near-linearly, so sRGB artwork looks washed out;
+  gamma 1.6-2.2 darkens midtones and restores perceived contrast/saturation.
+
+sat_power (optional, default 1.0): HSV saturation curve S' = S^p, palette only.
+  p < 1 boosts pale colors (e.g. skin tones that read as white on OLED) much
+  more than already-saturated ones. 0.5-0.7 is a good range. Applied before gamma.
 
 Config is a comma-separated list of frame specs:
   <gif_frame>:<next>[:<ref>[:<duration_ms>]]
@@ -38,7 +46,62 @@ def rgb_to_rgb565(r, g, b):
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
 
+# Pixel art with few unique colors: merge nearest color pairs instead of
+# MEDIANCUT, which tends to drop small-but-salient colors (eye highlights,
+# accent colors on clothing).
+MERGE_QUANTIZE_MAX_COLORS = 48
+
+
+def quantize_by_merging(img_arr, max_colors):
+    import math
+    u, c = np.unique(img_arr.reshape(-1, 3), axis=0, return_counts=True)
+    colors = [tuple(int(v) for v in x) for x in u]
+    weight = {col: int(n) for col, n in zip(colors, c)}
+    protected = {(0, 0, 0), (255, 255, 255)} & set(colors)
+    mapping = {col: col for col in colors}
+    cur = list(colors)
+    while len(cur) > max_colors:
+        best = None
+        best_score = float('inf')
+        for a in range(len(cur)):
+            for b in range(a + 1, len(cur)):
+                if cur[a] in protected or cur[b] in protected:
+                    continue
+                d = sum((cur[a][k] - cur[b][k]) ** 2 for k in range(3))
+                # sqrt(count) weighting: rare near-duplicates merge first,
+                # but visually distinct rare colors survive
+                score = d * math.sqrt(min(weight[cur[a]], weight[cur[b]]))
+                if score < best_score:
+                    best_score = score
+                    best = (cur[a], cur[b])
+        ca, cb = best
+        keep, drop = (ca, cb) if weight[ca] >= weight[cb] else (cb, ca)
+        for col in colors:
+            if mapping[col] == drop:
+                mapping[col] = keep
+        weight[keep] += weight[drop]
+        cur.remove(drop)
+        print(f"  Merge: {drop} -> {keep}")
+
+    palette_rgb = [list(col) for col in cur]
+    pal_index = {col: i for i, col in enumerate(cur)}
+    h, w = img_arr.shape[:2]
+    indexed = np.zeros((h, w), dtype=np.uint8)
+    flat = img_arr.reshape(-1, 3)
+    idx_flat = np.array([pal_index[mapping[tuple(int(v) for v in px)]] for px in flat], dtype=np.uint8)
+    indexed = idx_flat.reshape(h, w)
+    while len(palette_rgb) < max_colors:
+        palette_rgb.append([0, 0, 0])
+    palette_rgb565 = [rgb_to_rgb565(r, g, b) for r, g, b in palette_rgb]
+    return palette_rgb565, palette_rgb, indexed
+
+
 def quantize_to_palette(img_arr, max_colors=PALETTE_SIZE):
+    n_unique = len(np.unique(img_arr.reshape(-1, 3), axis=0))
+    if n_unique <= MERGE_QUANTIZE_MAX_COLORS:
+        print(f"  Quantize: merge method ({n_unique} unique colors)")
+        return quantize_by_merging(img_arr, max_colors)
+
     img = Image.fromarray(img_arr)
     quantized = img.quantize(colors=max_colors, method=Image.MEDIANCUT)
     palette_data = quantized.getpalette()[:max_colors * 3]
@@ -165,6 +228,8 @@ def main():
 
     gif_path = sys.argv[1]
     config_str = sys.argv[2]
+    gamma = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+    sat_power = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
     output_name = os.path.splitext(os.path.basename(gif_path))[0]
     output_file = os.path.join(OUTPUT_DIR, f'icon_{output_name}.h')
 
@@ -236,6 +301,20 @@ def main():
     palette_565, palette_rgb, combined_indexed = quantize_to_palette(combined, PALETTE_SIZE)
     print(f"Palette: {len(palette_565)} colors")
 
+    # Optional saturation boost + gamma correction, applied to the output palette
+    # only (verification below still compares against the original colors)
+    if sat_power != 1.0 or gamma != 1.0:
+        import colorsys
+        corrected = []
+        for rgb in palette_rgb:
+            r, g, b = [v / 255 for v in rgb]
+            if sat_power != 1.0:
+                h, s, v = colorsys.rgb_to_hsv(r, g, b)
+                r, g, b = colorsys.hsv_to_rgb(h, s ** sat_power, v)
+            corrected.append([round(255 * c ** gamma) for c in (r, g, b)])
+        palette_565 = [rgb_to_rgb565(r, g, b) for r, g, b in corrected]
+        print(f"Palette correction: sat_power={sat_power}, gamma={gamma}")
+
     # Extract indexed data
     indexed_data = {}
     y_offset = 0
@@ -251,12 +330,24 @@ def main():
     for idx, data in indexed_data.items():
         packed[idx] = pack_4bit(data)
 
+    # Dedupe identical frame data (e.g. the same gif frame appearing twice in a sequence)
+    data_owner = {}   # output frame idx -> idx whose array holds the data
+    seen = {}
+    for i in range(n_frames):
+        key = (bytes(packed[i]), frame_info[i]['type'], frame_info[i]['region'])
+        if key in seen:
+            data_owner[i] = seen[key]
+            print(f"  Frame {i}: identical to frame {seen[key]}, sharing data array")
+        else:
+            seen[key] = i
+            data_owner[i] = i
+
     # Generate header
     with open(output_file, 'w') as f:
         f.write(f'// Auto-generated image data: {output_name}\n')
         f.write(f'// Source: {os.path.basename(gif_path)}\n')
         f.write(f'// Config: {config_str}\n')
-        f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}"\n\n')
+        f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}" {gamma} {sat_power}\n\n')
 
         f.write(f'#define IMG_W {img_w}\n')
         f.write(f'#define IMG_H {img_h}\n')
@@ -269,7 +360,8 @@ def main():
 
         # Frame data arrays
         for i in range(n_frames):
-            write_c_array(f, 'uint8_t', f'frame_data_{i}', packed[i])
+            if data_owner[i] == i:
+                write_c_array(f, 'uint8_t', f'frame_data_{i}', packed[i])
 
         f.write(f'static const Frame frames[FRAME_COUNT] PROGMEM = {{\n')
         for i, info in enumerate(frame_info):
@@ -281,16 +373,17 @@ def main():
             else:
                 rx, ry, rw, rh = 0, 0, 0, 0
             duration = info['spec']['duration']
-            f.write(f'  {{ {ftype}, {next_idx}, {ref_idx}, {rx}, {ry}, {rw}, {rh}, {duration}, frame_data_{i} }},')
+            f.write(f'  {{ {ftype}, {next_idx}, {ref_idx}, {rx}, {ry}, {rw}, {rh}, {duration}, frame_data_{data_owner[i]} }},')
             f.write(f'  // f{i}: {"overlay on "+str(ref_idx) if ftype else "full"}')
             f.write(f' {duration}ms -> f{next_idx}\n')
         f.write('};\n')
 
     # Summary
-    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames)) + n_frames * 8
+    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames) if data_owner[i] == i) + n_frames * 8
     print(f"\nGenerated: {output_file}")
     for i in range(n_frames):
-        print(f"  Frame {i} ({frame_info[i]['type']}): {len(packed[i])} bytes")
+        shared = '' if data_owner[i] == i else f" (shared with frame {data_owner[i]})"
+        print(f"  Frame {i} ({frame_info[i]['type']}): {len(packed[i])} bytes{shared}")
     print(f"Total image data: {total} bytes")
 
     # Verification
