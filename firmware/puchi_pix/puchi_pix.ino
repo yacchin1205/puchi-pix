@@ -7,7 +7,7 @@
 // 画像データ (アイコン差し替えはここだけ変更)
 // =====================
 #include "frame.h"
-#include "icon_original.h"
+#include "icon_dotpict3.h"
 
 // =====================
 // ディスプレイ抽象化レイヤー
@@ -15,7 +15,10 @@
 #include "display.h"
 
 // デバッグ: loopカウンタをY=0に表示
-#define DEBUG_LOOP_COUNTER 1
+#define DEBUG_LOOP_COUNTER 0
+
+// 上方向インジケーター (赤ドット)。フラッシュ節約のためデフォルト無効
+#define ENABLE_UP_INDICATOR 0
 
 #if DEBUG_LOOP_COUNTER
 static uint16_t dbgLoopCount = 0;
@@ -61,6 +64,26 @@ static uint8_t  curFrame = 0;
 static int8_t   lastDrawnFrame = -1;
 static uint8_t  currentOrient = 0;
 static uint32_t lastFrameTime = 0;
+
+// =====================
+// 歩き登場アニメーション
+// 右から歩いて入場 → 中央で振り向いて手を挙げる → 左へ歩いて退場
+// =====================
+// icon_dotpict3.h のフレーム役割
+static constexpr uint8_t FRAME_WALK_A     = 0;  // 歩き(脚A)
+static constexpr uint8_t FRAME_WALK_B     = 1;  // 歩き(脚B)
+static constexpr uint8_t FRAME_GREET_START = 2; // 振り向き(以降チェーンで手上げ→戻り)
+
+static constexpr int16_t  WALK_CENTER_X = (DISPLAY_W - IMG_W) / 2;
+static constexpr int16_t  WALK_ENTER_X  = DISPLAY_W;   // 右端の画面外
+static constexpr int16_t  WALK_EXIT_X   = -IMG_W;      // 左端の画面外
+static constexpr uint8_t  WALK_STEP_PX  = 4;
+static constexpr uint16_t WALK_STEP_MS  = 150;
+static constexpr uint16_t WALK_PAUSE_MS = 800;         // 退場後、再入場までの待ち
+
+enum WalkMode : uint8_t { MODE_WALK_IN, MODE_GREET, MODE_WALK_OUT, MODE_OFFSCREEN };
+static uint8_t walkMode = MODE_WALK_IN;
+static int16_t spriteX  = WALK_ENTER_X;  // 見た目上のX位置 (orient 3では鏡映して描画)
 
 // ---------- KXTJ3 low-level ----------
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -129,100 +152,11 @@ static void displayFillCircle(int x0, int y0, int rad, uint8_t r8, uint8_t g8, u
 }
 
 // ---------- Frame描画 ----------
-// Orientation: 0=normal, 1=90°CW(左傾き), 2=90°CCW(右傾き), 3=180°(上傾き)
-
-static inline uint16_t getStartX(uint8_t orient) {
-  if (orient == 1) return 0;
-  if (orient == 2) return DISPLAY_W - IMG_W;
-  return (DISPLAY_W - IMG_W) / 2;
-}
-
-static inline uint16_t getSrcIndex(uint8_t x, uint8_t y, uint8_t orient, uint8_t w, uint8_t h) {
-  uint8_t srcX, srcY;
-  switch (orient) {
-    case 1:  srcX = y; srcY = (h - 1) - x; break;
-    case 2:  srcX = (w - 1) - y; srcY = x; break;
-    case 3:  srcX = (w - 1) - x; srcY = (h - 1) - y; break;
-    default: srcX = x; srcY = y; break;
-  }
-  return (uint16_t)srcY * w + srcX;
-}
+// Orientation: 0=normal, 3=180°(逆さ)。90°(orient 1/2)は非対応。
 
 static inline uint8_t read4bit(const uint8_t* data, uint16_t pixelIdx) {
   uint8_t b = pgm_read_byte(&data[pixelIdx >> 1]);
   return (pixelIdx & 1) ? (b & 0x0F) : (b >> 4);
-}
-
-static void drawFullFrame(const uint8_t* data, uint8_t orient) {
-  uint16_t screenX = getStartX(orient);
-  for (uint8_t dy = 0; dy < IMG_H; dy++) {
-    displayBeginWrite(screenX, dy, IMG_W, 1);
-    for (uint8_t dx = 0; dx < IMG_W; dx++) {
-      uint16_t srcIdx = getSrcIndex(dx, dy, orient, IMG_W, IMG_H);
-      uint8_t idx = read4bit(data, srcIdx);
-      displayWritePixel(pgm_read_word(&palette[idx]));
-    }
-    displayEndWrite();
-  }
-}
-
-static void drawOverlay(const uint8_t* data, uint8_t orient,
-                        uint8_t srcX, uint8_t srcY, uint8_t srcW, uint8_t srcH) {
-  uint8_t dstX, dstY, dstW, dstH;
-  switch (orient) {
-    case 1:  dstX = (IMG_H-1)-(srcY+srcH-1); dstY = srcX; dstW = srcH; dstH = srcW; break;
-    case 2:  dstX = srcY; dstY = (IMG_W-1)-(srcX+srcW-1); dstW = srcH; dstH = srcW; break;
-    case 3:  dstX = (IMG_W-1)-(srcX+srcW-1); dstY = (IMG_H-1)-(srcY+srcH-1); dstW = srcW; dstH = srcH; break;
-    default: dstX = srcX; dstY = srcY; dstW = srcW; dstH = srcH; break;
-  }
-  uint16_t screenX = getStartX(orient) + dstX;
-  for (uint8_t dy = 0; dy < dstH; dy++) {
-    displayBeginWrite(screenX, dstY + dy, dstW, 1);
-    for (uint8_t dx = 0; dx < dstW; dx++) {
-      uint16_t srcIdx = getSrcIndex(dx, dy, orient, srcW, srcH);
-      uint8_t idx = read4bit(data, srcIdx);
-      displayWritePixel(pgm_read_word(&palette[idx]));
-    }
-    displayEndWrite();
-  }
-}
-
-static void drawRegionFromFull(const uint8_t* fullData, uint8_t orient,
-                                uint8_t rx, uint8_t ry, uint8_t rw, uint8_t rh) {
-  uint8_t dstX, dstY, dstW, dstH;
-  switch (orient) {
-    case 1:  dstX = (IMG_H-1)-(ry+rh-1); dstY = rx; dstW = rh; dstH = rw; break;
-    case 2:  dstX = ry; dstY = (IMG_W-1)-(rx+rw-1); dstW = rh; dstH = rw; break;
-    case 3:  dstX = (IMG_W-1)-(rx+rw-1); dstY = (IMG_H-1)-(ry+rh-1); dstW = rw; dstH = rh; break;
-    default: dstX = rx; dstY = ry; dstW = rw; dstH = rh; break;
-  }
-  uint16_t screenX = getStartX(orient) + dstX;
-  for (uint8_t dy = 0; dy < dstH; dy++) {
-    displayBeginWrite(screenX, dstY + dy, dstW, 1);
-    for (uint8_t dx = 0; dx < dstW; dx++) {
-      uint16_t srcIdx = getSrcIndex(dstX + dx, dstY + dy, orient, IMG_W, IMG_H);
-      uint8_t idx = read4bit(fullData, srcIdx);
-      displayWritePixel(pgm_read_word(&palette[idx]));
-    }
-    displayEndWrite();
-  }
-}
-
-static void clearMargins(uint8_t orient) {
-  uint16_t imgX = getStartX(orient);
-  uint16_t rightX = imgX + IMG_W;
-  for (uint8_t y = 0; y < DISPLAY_H; y++) {
-    if (imgX > 0) {
-      displayBeginWrite(0, y, imgX, 1);
-      for (uint8_t x = 0; x < imgX; x++) displayWritePixel(0x0000);
-      displayEndWrite();
-    }
-    if (rightX < DISPLAY_W) {
-      displayBeginWrite(rightX, y, DISPLAY_W - rightX, 1);
-      for (uint8_t x = rightX; x < DISPLAY_W; x++) displayWritePixel(0x0000);
-      displayEndWrite();
-    }
-  }
 }
 
 static const uint8_t* getActiveFullFrameData(uint8_t frameIdx) {
@@ -232,64 +166,79 @@ static const uint8_t* getActiveFullFrameData(uint8_t frameIdx) {
   return (const uint8_t*)pgm_read_ptr(&frames[ref].data);
 }
 
-static void drawCurrentFrame(uint8_t frameIdx, uint8_t orient) {
-  uint8_t curType = pgm_read_byte(&frames[frameIdx].type);
-  const uint8_t* curData = (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
+// ---------- 歩きスプライト描画 (任意X位置、画面クリップ付き) ----------
+static inline int16_t walkScreenX(uint8_t orient) {
+  // orient 3 (180°) は描画が点対称に反転するので、見た目の位置を保つため鏡映する
+  return (orient == 3) ? (int16_t)(DISPLAY_W - IMG_W) - spriteX : spriteX;
+}
 
-  if (lastDrawnFrame < 0 || orient != currentOrient) {
-    clearMargins(orient);
-    currentOrient = orient;
-    if (curType == 0) {
-      drawFullFrame(curData, orient);
-    } else {
-      uint8_t curRef = pgm_read_byte(&frames[frameIdx].ref);
-      drawFullFrame((const uint8_t*)pgm_read_ptr(&frames[curRef].data), orient);
-      drawOverlay(curData, orient,
-        pgm_read_byte(&frames[frameIdx].rx), pgm_read_byte(&frames[frameIdx].ry),
-        pgm_read_byte(&frames[frameIdx].rw), pgm_read_byte(&frames[frameIdx].rh));
-    }
-    lastDrawnFrame = frameIdx;
-    return;
+static void drawSpriteAt(uint8_t frameIdx, int16_t posX, uint8_t orient) {
+  const uint8_t* full = getActiveFullFrameData(frameIdx);
+  const uint8_t* ovl = NULL;
+  uint8_t rx = 0, ry = 0, rw = 0, rh = 0;
+  if (pgm_read_byte(&frames[frameIdx].type) == 1) {
+    ovl = (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
+    rx = pgm_read_byte(&frames[frameIdx].rx);
+    ry = pgm_read_byte(&frames[frameIdx].ry);
+    rw = pgm_read_byte(&frames[frameIdx].rw);
+    rh = pgm_read_byte(&frames[frameIdx].rh);
   }
-
-  if ((uint8_t)lastDrawnFrame == frameIdx) return;
-
-  uint8_t prevIdx = (uint8_t)lastDrawnFrame;
-  uint8_t prevType = pgm_read_byte(&frames[prevIdx].type);
-
-  if (curType == 0) {
-    if (prevType == 1 && pgm_read_byte(&frames[prevIdx].ref) == frameIdx) {
-      drawRegionFromFull(curData, orient,
-        pgm_read_byte(&frames[prevIdx].rx), pgm_read_byte(&frames[prevIdx].ry),
-        pgm_read_byte(&frames[prevIdx].rw), pgm_read_byte(&frames[prevIdx].rh));
-    } else {
-      drawFullFrame(curData, orient);
-    }
-  } else {
-    uint8_t curRef = pgm_read_byte(&frames[frameIdx].ref);
-    uint8_t rx = pgm_read_byte(&frames[frameIdx].rx);
-    uint8_t ry = pgm_read_byte(&frames[frameIdx].ry);
-    uint8_t rw = pgm_read_byte(&frames[frameIdx].rw);
-    uint8_t rh = pgm_read_byte(&frames[frameIdx].rh);
-
-    if (prevType == 0 && curRef == prevIdx) {
-      drawOverlay(curData, orient, rx, ry, rw, rh);
-    } else if (prevType == 1 && pgm_read_byte(&frames[prevIdx].ref) == curRef) {
-      uint8_t prevRx = pgm_read_byte(&frames[prevIdx].rx);
-      uint8_t prevRy = pgm_read_byte(&frames[prevIdx].ry);
-      uint8_t prevRw = pgm_read_byte(&frames[prevIdx].rw);
-      uint8_t prevRh = pgm_read_byte(&frames[prevIdx].rh);
-      if (prevRx != rx || prevRy != ry || prevRw != rw || prevRh != rh) {
-        drawRegionFromFull((const uint8_t*)pgm_read_ptr(&frames[curRef].data),
-          orient, prevRx, prevRy, prevRw, prevRh);
+  int16_t sx0 = posX < 0 ? 0 : posX;
+  int16_t sx1 = (posX + IMG_W > DISPLAY_W) ? DISPLAY_W : posX + IMG_W;
+  if (sx0 >= sx1) return;
+  bool flip = (orient == 3);
+  for (uint8_t dy = 0; dy < IMG_H; dy++) {
+    displayBeginWrite(sx0, dy, sx1 - sx0, 1);
+    for (int16_t sx = sx0; sx < sx1; sx++) {
+      uint8_t lx = (uint8_t)(sx - posX);
+      uint8_t srcX = flip ? (IMG_W - 1 - lx) : lx;
+      uint8_t srcY = flip ? (IMG_H - 1 - dy) : dy;
+      uint8_t idx;
+      if (ovl && srcX >= rx && srcX < rx + rw && srcY >= ry && srcY < ry + rh) {
+        idx = read4bit(ovl, (uint16_t)(srcY - ry) * rw + (srcX - rx));
+      } else {
+        idx = read4bit(full, (uint16_t)srcY * IMG_W + srcX);
       }
-      drawOverlay(curData, orient, rx, ry, rw, rh);
-    } else {
-      drawFullFrame((const uint8_t*)pgm_read_ptr(&frames[curRef].data), orient);
-      drawOverlay(curData, orient, rx, ry, rw, rh);
+      displayWritePixel(pgm_read_word(&palette[idx]));
     }
+    displayEndWrite();
   }
+}
 
+static void clearColumns(int16_t x0, int16_t x1) {  // [x0, x1) を黒でクリア
+  if (x0 < 0) x0 = 0;
+  if (x1 > DISPLAY_W) x1 = DISPLAY_W;
+  if (x0 >= x1) return;
+  for (uint8_t y = 0; y < DISPLAY_H; y++) {
+    displayHLine(x0, y, x1 - x0, 0, 0, 0);
+  }
+}
+
+// アニメーションを初期状態 (右から歩き入場) に戻す
+static void resetAnimation() {
+  curFrame = FRAME_WALK_A;
+  lastDrawnFrame = -1;
+  walkMode = MODE_WALK_IN;
+  spriteX = WALK_ENTER_X;
+  displayFillScreen(0, 0, 0);
+}
+
+static void walkStep(uint8_t orient) {
+  int16_t oldPos = walkScreenX(orient);
+  spriteX -= WALK_STEP_PX;
+  if (walkMode == MODE_WALK_IN && spriteX < WALK_CENTER_X) spriteX = WALK_CENTER_X;
+  int16_t newPos = walkScreenX(orient);
+  curFrame = (curFrame == FRAME_WALK_A) ? FRAME_WALK_B : FRAME_WALK_A;
+  drawSpriteAt(curFrame, newPos, orient);
+  // 移動で空いた跡を消す
+  if (newPos > oldPos) clearColumns(oldPos, newPos);
+  else if (newPos < oldPos) clearColumns(newPos + IMG_W, oldPos + IMG_W);
+  lastDrawnFrame = -1;  // 位置が動いたので差分描画の前提を無効化
+}
+
+static void drawCurrentFrame(uint8_t frameIdx, uint8_t orient) {
+  currentOrient = orient;
+  drawSpriteAt(frameIdx, walkScreenX(orient), orient);
   lastDrawnFrame = frameIdx;
 }
 
@@ -299,9 +248,7 @@ static void onOrientChange(uint8_t newOrient) {
   displayReset();
 
   currentOrient = newOrient;
-  curFrame = 0;
-  lastDrawnFrame = -1;
-  displayFillScreen(0, 0, 0);
+  resetAnimation();
 
   displayFade(false);
   delay(250);
@@ -325,15 +272,8 @@ static bool readXYZRaw(int16_t &x, int16_t &y, int16_t &z) {
 }
 
 // ---------- motion ----------
-static float posX=0, posY=0, velX=0, velY=0;
 static int16_t xRef=0, yRef=0, zRef=0;
 static uint8_t calibrated=0;
-static float fdx=0, fdy=0;
-static int prevCx=-9999, prevCy=-9999;
-
-static inline float clampf(float v, float lo, float hi) {
-  return (v < lo) ? lo : (v > hi) ? hi : v;
-}
 
 static void calibrateKXTJ3(uint8_t samples=80) {
   long sx=0, sy=0, sz=0;
@@ -347,7 +287,6 @@ static void calibrateKXTJ3(uint8_t samples=80) {
   xRef = (int16_t)(sx / got);
   yRef = (int16_t)(sy / got);
   zRef = (int16_t)(sz / got);
-  fdx = fdy = 0;
   calibrated = 1;
 }
 
@@ -361,44 +300,34 @@ static uint8_t detectOrientation() {
   const int16_t thresholdIn = 8000;
   const int16_t thresholdOut = 4000;
 
+  // 上下 (orient 0/3) のみ判定。90°横向きは非対応
   int16_t absDx = dx > 0 ? dx : -dx;
   int16_t absDy = dy > 0 ? dy : -dy;
-  int16_t maxTilt = absDx > absDy ? absDx : absDy;
 
-  if (maxTilt > thresholdOut) {
-    switch (currentOrient) {
-      case 1:  if (absDx > absDy && dx < 0) return 1; break;
-      case 2:  if (absDx > absDy && dx > 0) return 2; break;
-      case 3:  if (absDy > absDx && dy < 0) return 3; break;
-      case 0:  if (absDy > absDx && dy > 0) return 0; break;
-    }
-  } else {
-    return currentOrient;
-  }
-
-  if (maxTilt > thresholdIn) {
-    if (absDx > absDy) return (dx > 0) ? 2 : 1;
-    else return (dy < 0) ? 3 : 0;
-  }
-
+  if (absDy <= thresholdOut || absDx > absDy) return currentOrient;
+  if (currentOrient == 3 && dy < 0) return 3;
+  if (currentOrient == 0 && dy > 0) return 0;
+  if (absDy > thresholdIn) return (dy < 0) ? 3 : 0;
   return currentOrient;
 }
 
 // ---------- 上方向インジケーター ----------
+#if ENABLE_UP_INDICATOR
 static int16_t prevIndX = -1, prevIndY = -1;
 
 static void restorePixel(int16_t sx, int16_t sy) {
   if (sx < 0 || sx >= DISPLAY_W || sy < 0 || sy >= DISPLAY_H) return;
 
-  uint16_t imgX = getStartX(currentOrient);
+  int16_t imgX = walkScreenX(currentOrient);
   uint16_t color;
 
   if (sx >= imgX && sx < imgX + IMG_W && sy < IMG_H) {
     uint8_t localX = sx - imgX;
     uint8_t localY = sy;
-    uint16_t srcIdx = getSrcIndex(localX, localY, currentOrient, IMG_W, IMG_H);
+    uint8_t srcX = (currentOrient == 3) ? (IMG_W - 1 - localX) : localX;
+    uint8_t srcY = (currentOrient == 3) ? (IMG_H - 1 - localY) : localY;
     const uint8_t* fullData = getActiveFullFrameData(curFrame);
-    uint8_t palIdx = read4bit(fullData, srcIdx);
+    uint8_t palIdx = read4bit(fullData, (uint16_t)srcY * IMG_W + srcX);
     color = pgm_read_word(&palette[palIdx]);
   } else {
     color = 0x0000;
@@ -438,6 +367,7 @@ static void drawUpIndicator() {
   prevIndX = posX;
   prevIndY = posY;
 }
+#endif  // ENABLE_UP_INDICATOR
 
 // HSI 8MHz, PLLなし (省電力)
 extern "C" void SystemClock_Config(void) {
@@ -459,7 +389,6 @@ extern "C" void SystemClock_Config(void) {
 
 void setup() {
   displayInit();
-  displayFillScreen(255, 255, 255);
 
   Wire.setSDA(PB_7);
   Wire.setSCL(PB_6);
@@ -474,9 +403,7 @@ void setup() {
   enableWakeupInterrupt();
   attachInterrupt(digitalPinToInterrupt(KXTJ3_INT_PIN), wakeupCallback, FALLING);
 
-  curFrame = 0;
-  lastDrawnFrame = -1;
-  displayFillScreen(0, 0, 0);
+  resetAnimation();
   lastActivityMs = millis();
   lastFrameTime = millis();
 }
@@ -496,9 +423,7 @@ void loop() {
     displayBrightness(BRIGHT_FULL);
     lastActivityMs = millis();
     lastFrameTime = millis();
-    curFrame = 0;
-    lastDrawnFrame = -1;
-    displayFillScreen(0, 0, 0);
+    resetAnimation();
     return;
   }
 
@@ -535,19 +460,51 @@ void loop() {
     return;
   }
 
-  // フレーム進行
-  uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
-  if (now - lastFrameTime >= duration) {
-    lastFrameTime = now;
-    curFrame = pgm_read_byte(&frames[curFrame].next);
+  // アニメーション進行
+  if (walkMode == MODE_GREET) {
+    // 中央での振り向き〜手上げはFrameチェーンで再生
+    uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
+    if (now - lastFrameTime >= duration) {
+      lastFrameTime = now;
+      uint8_t nextFrame = pgm_read_byte(&frames[curFrame].next);
+      if (nextFrame == FRAME_WALK_A) {
+        // チェーン終端 (振り向き戻し完了) → 左へ歩き出す
+        walkMode = MODE_WALK_OUT;
+        curFrame = FRAME_WALK_A;
+      } else {
+        curFrame = nextFrame;
+      }
+    }
+    if (lastDrawnFrame < 0 || (uint8_t)lastDrawnFrame != curFrame) {
+      drawCurrentFrame(curFrame, orient);
+    }
+  } else if (walkMode == MODE_OFFSCREEN) {
+    if (now - lastFrameTime >= WALK_PAUSE_MS) {
+      lastFrameTime = now;
+      walkMode = MODE_WALK_IN;
+      spriteX = WALK_ENTER_X;
+      curFrame = FRAME_WALK_A;
+    }
+  } else {  // MODE_WALK_IN / MODE_WALK_OUT
+    if (now - lastFrameTime >= WALK_STEP_MS) {
+      lastFrameTime = now;
+      if (walkMode == MODE_WALK_IN && spriteX <= WALK_CENTER_X) {
+        // 中央到達 → 振り向いて挨拶
+        walkMode = MODE_GREET;
+        curFrame = FRAME_GREET_START;
+        lastDrawnFrame = -1;
+        drawCurrentFrame(curFrame, orient);
+      } else if (walkMode == MODE_WALK_OUT && spriteX <= WALK_EXIT_X) {
+        walkMode = MODE_OFFSCREEN;
+      } else {
+        walkStep(orient);
+      }
+    }
   }
 
-  // 描画
-  if (lastDrawnFrame < 0 || (uint8_t)lastDrawnFrame != curFrame || orient != currentOrient) {
-    drawCurrentFrame(curFrame, orient);
-  }
-
+#if ENABLE_UP_INDICATOR
   drawUpIndicator();
+#endif
 
 #if DEBUG_LOOP_COUNTER
   static uint32_t dbgLastTime = 0;
