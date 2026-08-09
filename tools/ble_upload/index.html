@@ -73,6 +73,7 @@
 
   <div class="row">
     <input type="file" id="file" accept="image/*">
+    <label>背景色 <input type="color" id="bg" value="#000000" title="透明部分とdisposalクリアの塗り色"></label>
     <select id="size">
       <option value="auto" selected>サイズ自動</option>
       <option value="64">64×64</option>
@@ -185,13 +186,13 @@
       }
     });
 
-    // ---- File pick ----
-    $('file').addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      log(`loading: ${file.name} (${file.size} bytes)`);
+    // ---- File pick / background change: (re)compose and build ----
+    let lastFile = null;
+
+    const recompose = async () => {
+      if (!lastFile) return;
       try {
-        lastComposed = await fileToComposed(file);
+        lastComposed = await fileToComposed(lastFile);
         payload = buildPayload(lastComposed);
         log(`payload built: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
         if (server && server.connected) $('upload').disabled = false;
@@ -199,7 +200,16 @@
         log('parse error:', err.message);
         payload = null;
       }
+    };
+
+    $('file').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      log(`loading: ${file.name} (${file.size} bytes)`);
+      lastFile = file;
+      await recompose();
     });
+    $('bg').addEventListener('change', recompose);
 
     // ---- Size / color change: rebuild payload from the last loaded image ----
     const rebuild = () => {
@@ -270,12 +280,13 @@
         log(`${frames.length} frame(s), canvas ${parsed.lsd.width}x${parsed.lsd.height}`);
         return composeGifFrames(parsed, frames);
       }
-      // Static image (PNG, JPEG, WebP, ...) -> single frame, alpha flattened onto black
+      // Static image (PNG, JPEG, WebP, ...) -> single frame, alpha flattened
+      // onto the selected background color
       const bmp = await createImageBitmap(file);
       const canvas = document.createElement('canvas');
       canvas.width = bmp.width; canvas.height = bmp.height;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = $('bg').value;
       ctx.fillRect(0, 0, bmp.width, bmp.height);
       ctx.drawImage(bmp, 0, 0);
       log(`static image ${bmp.width}x${bmp.height} (1 frame)`);
@@ -287,16 +298,20 @@
 
     function composeGifFrames(parsed, frames) {
       const W = parsed.lsd.width, H = parsed.lsd.height;
+      const bg = $('bg').value;
 
-      // Composite each frame onto a full-size canvas (handles patches/dirty rects)
+      // Composite each patch onto a full-size canvas, honoring per-frame
+      // disposal. Transparency is meaningless on the device, so both the
+      // initial canvas and disposal=2 clears use the selected background.
       const canvas = document.createElement('canvas');
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = bg;
       ctx.fillRect(0, 0, W, H);
 
       const composed = [];
       for (const f of frames) {
+        const pre = (f.disposalType === 3) ? ctx.getImageData(0, 0, W, H) : null;
         const patchCanvas = document.createElement('canvas');
         patchCanvas.width = f.dims.width;
         patchCanvas.height = f.dims.height;
@@ -309,8 +324,14 @@
           delay: f.delay,
           imageData: ctx.getImageData(0, 0, W, H)
         });
-        // Naive disposal: simulate disposal=2 (clear to bg) by clearing each iteration?
-        // No - keep canvas for next frame (simulate disposal=1, leave). Most GIFs assume this.
+        // Disposal applies after the frame is shown:
+        // 2 = clear the frame's rect to background, 3 = restore pre-frame state
+        if (f.disposalType === 2) {
+          ctx.fillStyle = bg;
+          ctx.fillRect(f.dims.left, f.dims.top, f.dims.width, f.dims.height);
+        } else if (pre) {
+          ctx.putImageData(pre, 0, 0);
+        }
       }
       return { composed, W, H };
     }
