@@ -9,3 +9,4 @@ puchi_pix_esp32/puchi_pix_esp32-backups/
 box/*.stl
 box/*.3mf
 *.kicad_prl
+.playwright-mcp/
