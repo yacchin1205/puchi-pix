@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'firmware/puchi_pix/**'
+      - 'firmware/puchi_pix_esp32/**'
       - '.github/workflows/compile.yml'
   pull_request:
     paths:
       - 'firmware/puchi_pix/**'
+      - 'firmware/puchi_pix_esp32/**'
       - '.github/workflows/compile.yml'
 
 jobs:
@@ -23,3 +25,15 @@ jobs:
           key: arduino-stm32-2.12.0
       - run: arduino-cli core install STMicroelectronics:stm32@2.12.0 --additional-urls https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json
       - run: arduino-cli compile --fqbn STMicroelectronics:stm32:GenG0:pnum=GENERIC_G030F6PX,xserial=none firmware/puchi_pix
+
+  puchi_pix_esp32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino-esp32-3.3.7
+      - run: arduino-cli core install esp32:esp32@3.3.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - run: arduino-cli compile --fqbn esp32:esp32:esp32c3:PartitionScheme=min_spiffs,CDCOnBoot=default firmware/puchi_pix_esp32

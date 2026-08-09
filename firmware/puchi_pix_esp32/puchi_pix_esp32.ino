@@ -1,6 +1,7 @@
-// GC9A01 free-rotation viewer with BLE image upload
-// Inherits the 64-step gravity-following rotation from gc9a01_rotate.
-// Adds a BLE peripheral that accepts a custom multi-frame image payload
+// Puchi-Pix ESP32 (ESPr Developer C3): GC9A01 free-rotation viewer
+// with BLE image upload
+// 64-step (5.625deg) rotation following gravity tilt via KXTJ3.
+// A BLE peripheral accepts a custom multi-frame image payload
 // (GIF-converted) and swaps the active animation.
 //
 // BLE protocol:
