@@ -31,11 +31,11 @@
 //     [8..]   Palette: 16 (4bpp, 32 B) or 256 (8bpp, 512 B) x uint16 RGB565 LE
 //     then    Per frame: uint16 duration_ms (LE) + data[W*H*bpp/8]
 //             (4bpp: packed 2px/byte, even idx = high nibble; 8bpp: 1px/byte)
-//   v3 (diff chain; 64x64 or 128x128, 16 or 256 colors):
+//   v3 (diff chain; 64x64, 120x120 or 128x128, 16 or 256 colors):
 //     [0..1]  Magic 'PP'
 //     [2]     Version = 3
 //     [3..4]  Frame count N (uint16 LE, >= 1)
-//     [5]     Image size (64 or 128, square)
+//     [5]     Image size (64, 120 or 128, square)
 //     [6]     Bits per pixel: 4 = 16-color, 8 = 256-color
 //     [7]     Reserved (0)
 //     [8..]   Palette: 16 (4bpp, 32 B) or 256 (8bpp, 512 B) x uint16 RGB565 LE
@@ -117,14 +117,17 @@ static constexpr size_t UPLOAD_BUF_SIZE = 8 + 32 + 12u * ((size_t)MAX_IMG_SIZE *
 // All sources are pixel-doubled (shift 1).
 // 64x64  -> 128x128 visible; rotated corners sweep a 181px diagonal, so the
 //           output window is 192x192 (black outside the sprite erases trails).
+// 120x120 -> 240x240 visible, exactly filling the window. The 240px disc is
+//           the square's inscribed circle (radius 120 = half-side) at every
+//           rotation angle, so nothing is cropped and no black corners appear.
 // 128x128 -> 256x256 visible, cropped to the full 240x240 window. Its inscribed
 //           circle (256px) always covers the 240px disc, so no black corners
 //           and every visible pixel maps inside the source (radius 120/2 = 60 < 64).
 static constexpr uint8_t SCALE_SHIFT = 1;
 
 // Active source dimensions (updated when the image source switches)
-static uint8_t srcSize  = IMG_W;  // 64 or 128
-static int16_t outSize  = 192;    // output window: 192 (64src) or 240 (128src)
+static uint8_t srcSize  = IMG_W;  // 64, 120 or 128
+static int16_t outSize  = 192;    // output window: 192 (64src) or 240 (120/128src)
 
 // ---- 64-step rotation table (Q15) ----
 static const int16_t COS64[64] = {
@@ -298,7 +301,7 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
 // Point the renderer at the active source's dimensions
 static void applyActiveSource() {
   srcSize = uploadedActive ? upSize : IMG_W;
-  outSize = (srcSize == 128) ? 240 : 192;
+  outSize = (srcSize >= 120) ? 240 : 192;
 }
 
 // ---- Compose dispatchers ----
@@ -807,7 +810,7 @@ static bool validateUpload() {
     n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
     if (n == 0) return false;
     size = uploadBuf[5];
-    if (size != 64 && size != 128) return false;
+    if (size != 64 && size != 120 && size != 128) return false;
     bpp = uploadBuf[6];
     if (bpp != 4 && bpp != 8) return false;
     palOff = 8;

@@ -76,7 +76,8 @@
     <select id="size">
       <option value="auto" selected>サイズ自動</option>
       <option value="64">64×64</option>
-      <option value="128">128×128</option>
+      <option value="120">120×120</option>
+      <option value="128">128×128 (端4pxは表示外)</option>
     </select>
     <select id="colors">
       <option value="16" selected>16色 (4bit)</option>
@@ -320,9 +321,11 @@
       // Show original (1st frame composited)
       drawCanvasTo($('orig'), composed[0].imageData);
 
-      // Target size: auto picks 128 for sources larger than 64
+      // Target size: auto picks 120 (full display coverage) for sources
+      // larger than 64. 128 stays selectable for native-128 pixel art where
+      // edge cropping beats non-integer resampling.
       const sel = $('size').value;
-      const size = (sel === 'auto') ? ((W > 64 || H > 64) ? 128 : 64) : parseInt(sel, 10);
+      const size = (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
       const K = parseInt($('colors').value, 10);      // 16 or 256
       const bpp = (K === 256) ? 8 : 4;
       $('prev-label').textContent = `Quantized ${size}×${size} ${K}色 (1st frame preview)`;
