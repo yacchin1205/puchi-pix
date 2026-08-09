@@ -6,7 +6,14 @@ Output format: Frame structure array with linked-list style next pointers.
 Each frame is either a full frame or an overlay on a reference frame.
 The .ino decides which frame to start at, where to loop, etc.
 
-Run: python3 resources/generate_image_data.py <gif_path> <config> [gamma] [sat_power]
+Run: python3 resources/generate_image_data.py <gif_path> <config> [gamma] [sat_power] \
+       --walk-seq <i,i,...> --greet-start <i>
+
+--walk-seq (required): output frame indices the walk cycle steps through.
+--greet-start (required): output frame index where the greet chain begins;
+  the chain follows next pointers and ends when next == WALK_SEQ[0].
+Both are emitted into the header (WALK_SEQ / FRAME_GREET_START) so the icon
+carries its own frame roles; indices are validated against the frame count.
 
 gamma (optional, default 1.0): applied to the output palette only.
   OLED panels drive pixels near-linearly, so sRGB artwork looks washed out;
@@ -17,10 +24,13 @@ sat_power (optional, default 1.0): HSV saturation curve S' = S^p, palette only.
   more than already-saturated ones. 0.5-0.7 is a good range. Applied before gamma.
 
 Config is a comma-separated list of frame specs:
-  <gif_frame>:<next>[:<ref>[:<duration_ms>]]
+  <gif_frame>:<next>[:<ref>[:<duration_ms>[:<dy>]]]
 
-  ref: reference frame index for overlay (omit or empty for full frame)
+  ref: reference frame index for overlay (omit or empty for full frame).
+       May point to another overlay frame; the firmware walks the chain.
   duration_ms: display duration in ms (default: 150)
+  dy: vertical shift applied to ref content (default: 0). Rows shifted in
+      from outside the image render as palette index 0 (background).
 
 Example (blink loop):
   0::2000:1,1:2:0:150,2:3:0:150,3:0:0:150
@@ -38,7 +48,7 @@ import sys
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, '..', 'firmware', 'puchi_pix')
 
-OVERLAY_THRESHOLD = 0.5
+OVERLAY_THRESHOLD = 1.0  # store as overlay whenever the region is smaller than the full frame
 PALETTE_SIZE = 16
 
 
@@ -194,19 +204,17 @@ def compute_diff_region(base, frame, img_w, img_h):
     if not diff.any():
         return None
     ys, xs = np.where(diff)
-    x = max(0, int(xs.min()) - 1)
-    y = max(0, int(ys.min()) - 1)
-    w = min(img_w, int(xs.max()) + 2) - x
-    h = min(img_h, int(ys.max()) + 2) - y
-    if w % 2 != 0:
-        w = min(img_w - x, w + 1)
+    x = int(xs.min())
+    y = int(ys.min())
+    w = int(xs.max()) + 1 - x
+    h = int(ys.max()) + 1 - y
     return (x, y, w, h)
 
 
 def parse_config(config_str):
     """Parse frame config string.
-    Format: gif_frame:next[:ref[:duration_ms]], ...
-    Empty ref = full frame.  Default duration = 150ms.
+    Format: gif_frame:next[:ref[:duration_ms[:dy]]], ...
+    Empty ref = full frame.  Default duration = 150ms, default dy = 0.
     """
     frame_specs = []
     for spec in config_str.split(','):
@@ -215,21 +223,51 @@ def parse_config(config_str):
         next_idx = int(parts[1])
         ref_idx = int(parts[2]) if len(parts) > 2 and parts[2] != '' else None
         duration = int(parts[3]) if len(parts) > 3 and parts[3] != '' else 150
-        frame_specs.append({'gif': gif_idx, 'next': next_idx, 'ref': ref_idx, 'duration': duration})
+        dy = int(parts[4]) if len(parts) > 4 and parts[4] != '' else 0
+        frame_specs.append({'gif': gif_idx, 'next': next_idx, 'ref': ref_idx, 'duration': duration, 'dy': dy})
     return frame_specs
 
 
+def shift_rows(img, dy, fill):
+    """Shift image rows down by dy (up if negative), filling vacated rows."""
+    if dy == 0:
+        return img.copy()
+    out = np.empty_like(img)
+    out[...] = fill
+    if dy > 0:
+        out[dy:] = img[:-dy]
+    else:
+        out[:dy] = img[-dy:]
+    return out
+
+
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <gif_path> <config>")
-        print(f"  config: comma-separated frame specs: gif_frame:next[:ref[:duration_ms]]")
-        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:0:0:150")
+    args = sys.argv[1:]
+    walk_seq = None
+    greet_start = None
+    positional = []
+    i = 0
+    while i < len(args):
+        if args[i] == '--walk-seq':
+            walk_seq = [int(v) for v in args[i + 1].split(',')]
+            i += 2
+        elif args[i] == '--greet-start':
+            greet_start = int(args[i + 1])
+            i += 2
+        else:
+            positional.append(args[i])
+            i += 1
+
+    if len(positional) < 2 or walk_seq is None or greet_start is None:
+        print(f"Usage: {sys.argv[0]} <gif_path> <config> [gamma] [sat_power] --walk-seq <i,i,...> --greet-start <i>")
+        print(f"  config: comma-separated frame specs: gif_frame:next[:ref[:duration_ms[:dy]]]")
+        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:0:0:150 --walk-seq 0 --greet-start 1")
         sys.exit(1)
 
-    gif_path = sys.argv[1]
-    config_str = sys.argv[2]
-    gamma = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
-    sat_power = float(sys.argv[4]) if len(sys.argv) > 4 else 1.0
+    gif_path = positional[0]
+    config_str = positional[1]
+    gamma = float(positional[2]) if len(positional) > 2 else 1.0
+    sat_power = float(positional[3]) if len(positional) > 3 else 1.0
     output_name = os.path.splitext(os.path.basename(gif_path))[0]
     output_file = os.path.join(OUTPUT_DIR, f'icon_{output_name}.h')
 
@@ -244,6 +282,11 @@ def main():
     frame_specs = parse_config(config_str)
     n_frames = len(frame_specs)
     print(f"Output frames: {n_frames}")
+
+    bad_roles = [i for i in walk_seq + [greet_start] if not 0 <= i < n_frames]
+    if bad_roles:
+        print(f"Error: frame role indices {bad_roles} out of range (frame count {n_frames})")
+        sys.exit(1)
 
     # Determine base frame for background detection (first full frame)
     base_gif_idx = None
@@ -265,11 +308,12 @@ def main():
     for i, spec in enumerate(frame_specs):
         src = gif_frames[spec['gif']]
         if spec['ref'] is not None:
-            ref_src = gif_frames[frame_specs[spec['ref']]['gif']]
+            ref_src = shift_rows(gif_frames[frame_specs[spec['ref']]['gif']], spec['dy'], 0)
             region = compute_diff_region(ref_src, src, img_w, img_h)
             if region and (region[2] * region[3]) / (img_w * img_h) < OVERLAY_THRESHOLD:
                 ftype = 'overlay'
-                print(f"  Frame {i}: overlay on {spec['ref']} (region {region[2]}x{region[3]} at ({region[0]},{region[1]}))")
+                dy_note = f" dy={spec['dy']}" if spec['dy'] else ''
+                print(f"  Frame {i}: overlay on {spec['ref']}{dy_note} (region {region[2]}x{region[3]} at ({region[0]},{region[1]}))")
             else:
                 ftype = 'full'
                 region = None
@@ -347,7 +391,8 @@ def main():
         f.write(f'// Auto-generated image data: {output_name}\n')
         f.write(f'// Source: {os.path.basename(gif_path)}\n')
         f.write(f'// Config: {config_str}\n')
-        f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}" {gamma} {sat_power}\n\n')
+        f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}" {gamma} {sat_power}'
+                f' --walk-seq {",".join(map(str, walk_seq))} --greet-start {greet_start}\n\n')
 
         f.write(f'#define IMG_W {img_w}\n')
         f.write(f'#define IMG_H {img_h}\n')
@@ -373,13 +418,20 @@ def main():
             else:
                 rx, ry, rw, rh = 0, 0, 0, 0
             duration = info['spec']['duration']
-            f.write(f'  {{ {ftype}, {next_idx}, {ref_idx}, {rx}, {ry}, {rw}, {rh}, {duration}, frame_data_{data_owner[i]} }},')
+            dy = info['spec']['dy'] if ftype else 0
+            f.write(f'  {{ {ftype}, {next_idx}, {ref_idx}, {rx}, {ry}, {rw}, {rh}, {dy}, {duration}, frame_data_{data_owner[i]} }},')
             f.write(f'  // f{i}: {"overlay on "+str(ref_idx) if ftype else "full"}')
+            if dy:
+                f.write(f' dy={dy}')
             f.write(f' {duration}ms -> f{next_idx}\n')
         f.write('};\n')
 
+        f.write('\n// Frame roles consumed by the walk animation in puchi_pix.ino\n')
+        f.write(f'static constexpr uint8_t WALK_SEQ[] = {{{", ".join(map(str, walk_seq))}}};\n')
+        f.write(f'static constexpr uint8_t FRAME_GREET_START = {greet_start};\n')
+
     # Summary
-    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames) if data_owner[i] == i) + n_frames * 8
+    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames) if data_owner[i] == i) + n_frames * 16
     print(f"\nGenerated: {output_file}")
     for i in range(n_frames):
         shared = '' if data_owner[i] == i else f" (shared with frame {data_owner[i]})"
@@ -396,15 +448,25 @@ def main():
     verify_dir = os.path.join(SCRIPT_DIR, 'verify')
     os.makedirs(verify_dir, exist_ok=True)
 
+    # Mirror the firmware exactly: overlays compose over the *reconstruction* of
+    # their ref (which may itself be an overlay), shifted by dy with rows from
+    # outside the image rendered as palette index 0.
+    if any(info['spec']['dy'] for info in frame_info if info['type'] == 'overlay'):
+        assert palette_rgb[0] == [0, 0, 0], \
+            f"dy shift needs black at palette index 0, got {palette_rgb[0]}"
+
+    recon_indexed = {}
     for i, info in enumerate(frame_info):
         if info['type'] == 'full':
-            reconstructed = indexed_to_rgb(indexed_data[i])
+            recon_indexed[i] = indexed_data[i]
         else:
             ref_idx = info['spec']['ref']
-            assert frame_info[ref_idx]['type'] == 'full', f"Frame {i} ref {ref_idx} is not full"
-            reconstructed = indexed_to_rgb(indexed_data[ref_idx]).copy()
+            assert ref_idx < i, f"Frame {i} ref {ref_idx} must be an earlier frame"
+            base = shift_rows(recon_indexed[ref_idx], info['spec']['dy'], 0)
             x, y, w, h = info['region']
-            reconstructed[y:y+h, x:x+w] = indexed_to_rgb(indexed_data[i])
+            base[y:y+h, x:x+w] = indexed_data[i]
+            recon_indexed[i] = base
+        reconstructed = indexed_to_rgb(recon_indexed[i])
 
         original = gif_frames[info['spec']['gif']]
         diff = np.any(reconstructed != original, axis=2)

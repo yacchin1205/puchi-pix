@@ -7,7 +7,7 @@
 // 画像データ (アイコン差し替えはここだけ変更)
 // =====================
 #include "frame.h"
-#include "icon_dotpict3.h"
+#include "icon_original.h"
 
 // =====================
 // ディスプレイ抽象化レイヤー
@@ -69,10 +69,9 @@ static uint32_t lastFrameTime = 0;
 // 歩き登場アニメーション
 // 右から歩いて入場 → 中央で振り向いて手を挙げる → 左へ歩いて退場
 // =====================
-// icon_dotpict3.h のフレーム役割
-static constexpr uint8_t FRAME_WALK_A     = 0;  // 歩き(脚A)
-static constexpr uint8_t FRAME_WALK_B     = 1;  // 歩き(脚B)
-static constexpr uint8_t FRAME_GREET_START = 2; // 振り向き(以降チェーンで手上げ→戻り)
+// フレーム役割 (WALK_SEQ / FRAME_GREET_START) はアイコンヘッダが定義する。
+// greetチェーンは next が WALK_SEQ[0] に戻ったところで終端。
+static uint8_t walkPhase = 0;  // WALK_SEQ内の現在位置
 
 static constexpr int16_t  WALK_CENTER_X = (DISPLAY_W - IMG_W) / 2;
 static constexpr int16_t  WALK_ENTER_X  = DISPLAY_W;   // 右端の画面外
@@ -159,11 +158,39 @@ static inline uint8_t read4bit(const uint8_t* data, uint16_t pixelIdx) {
   return (pixelIdx & 1) ? (b & 0x0F) : (b >> 4);
 }
 
-static const uint8_t* getActiveFullFrameData(uint8_t frameIdx) {
-  uint8_t ftype = pgm_read_byte(&frames[frameIdx].type);
-  if (ftype == 0) return (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
-  uint8_t ref = pgm_read_byte(&frames[frameIdx].ref);
-  return (const uint8_t*)pgm_read_ptr(&frames[ref].data);
+// オーバーレイ連鎖: frameIdx から ref を辿り、ピクセルごとに最初に領域が
+// 当たったオーバーレイのデータを使う。当たらなければ refDy だけシフトして
+// 次の ref へ。フルフレームまで到達したらそこから読む。
+static constexpr uint8_t MAX_OVL_CHAIN = 8;
+
+static uint8_t buildOvlChain(uint8_t frameIdx, OvlDesc* chain, const uint8_t** fullOut) {
+  uint8_t depth = 0;
+  uint8_t f = frameIdx;
+  while (pgm_read_byte(&frames[f].type) == 1 && depth < MAX_OVL_CHAIN) {
+    chain[depth].data = (const uint8_t*)pgm_read_ptr(&frames[f].data);
+    chain[depth].rx = pgm_read_byte(&frames[f].rx);
+    chain[depth].ry = pgm_read_byte(&frames[f].ry);
+    chain[depth].rw = pgm_read_byte(&frames[f].rw);
+    chain[depth].rh = pgm_read_byte(&frames[f].rh);
+    chain[depth].refDy = (int8_t)pgm_read_byte(&frames[f].refDy);
+    depth++;
+    f = pgm_read_byte(&frames[f].ref);
+  }
+  *fullOut = (const uint8_t*)pgm_read_ptr(&frames[f].data);
+  return depth;
+}
+
+static uint8_t chainPixelIdx(const OvlDesc* chain, uint8_t depth, const uint8_t* full,
+                             uint8_t srcX, int16_t srcY) {
+  for (uint8_t d = 0; d < depth; d++) {
+    const OvlDesc& o = chain[d];
+    if (srcX >= o.rx && srcX < o.rx + o.rw && srcY >= o.ry && srcY < o.ry + o.rh) {
+      return read4bit(o.data, (uint16_t)(srcY - o.ry) * o.rw + (srcX - o.rx));
+    }
+    srcY -= o.refDy;
+    if (srcY < 0 || srcY >= IMG_H) return 0;  // シフトで画像外に出た行は背景
+  }
+  return read4bit(full, (uint16_t)srcY * IMG_W + srcX);
 }
 
 // ---------- 歩きスプライト描画 (任意X位置、画面クリップ付き) ----------
@@ -173,16 +200,9 @@ static inline int16_t walkScreenX(uint8_t orient) {
 }
 
 static void drawSpriteAt(uint8_t frameIdx, int16_t posX, uint8_t orient) {
-  const uint8_t* full = getActiveFullFrameData(frameIdx);
-  const uint8_t* ovl = NULL;
-  uint8_t rx = 0, ry = 0, rw = 0, rh = 0;
-  if (pgm_read_byte(&frames[frameIdx].type) == 1) {
-    ovl = (const uint8_t*)pgm_read_ptr(&frames[frameIdx].data);
-    rx = pgm_read_byte(&frames[frameIdx].rx);
-    ry = pgm_read_byte(&frames[frameIdx].ry);
-    rw = pgm_read_byte(&frames[frameIdx].rw);
-    rh = pgm_read_byte(&frames[frameIdx].rh);
-  }
+  OvlDesc chain[MAX_OVL_CHAIN];
+  const uint8_t* full;
+  uint8_t depth = buildOvlChain(frameIdx, chain, &full);
   int16_t sx0 = posX < 0 ? 0 : posX;
   int16_t sx1 = (posX + IMG_W > DISPLAY_W) ? DISPLAY_W : posX + IMG_W;
   if (sx0 >= sx1) return;
@@ -193,12 +213,7 @@ static void drawSpriteAt(uint8_t frameIdx, int16_t posX, uint8_t orient) {
       uint8_t lx = (uint8_t)(sx - posX);
       uint8_t srcX = flip ? (IMG_W - 1 - lx) : lx;
       uint8_t srcY = flip ? (IMG_H - 1 - dy) : dy;
-      uint8_t idx;
-      if (ovl && srcX >= rx && srcX < rx + rw && srcY >= ry && srcY < ry + rh) {
-        idx = read4bit(ovl, (uint16_t)(srcY - ry) * rw + (srcX - rx));
-      } else {
-        idx = read4bit(full, (uint16_t)srcY * IMG_W + srcX);
-      }
+      uint8_t idx = chainPixelIdx(chain, depth, full, srcX, srcY);
       displayWritePixel(pgm_read_word(&palette[idx]));
     }
     displayEndWrite();
@@ -216,7 +231,8 @@ static void clearColumns(int16_t x0, int16_t x1) {  // [x0, x1) を黒でクリ�
 
 // アニメーションを初期状態 (右から歩き入場) に戻す
 static void resetAnimation() {
-  curFrame = FRAME_WALK_A;
+  walkPhase = 0;
+  curFrame = WALK_SEQ[0];
   lastDrawnFrame = -1;
   walkMode = MODE_WALK_IN;
   spriteX = WALK_ENTER_X;
@@ -228,7 +244,8 @@ static void walkStep(uint8_t orient) {
   spriteX -= WALK_STEP_PX;
   if (walkMode == MODE_WALK_IN && spriteX < WALK_CENTER_X) spriteX = WALK_CENTER_X;
   int16_t newPos = walkScreenX(orient);
-  curFrame = (curFrame == FRAME_WALK_A) ? FRAME_WALK_B : FRAME_WALK_A;
+  walkPhase = (uint8_t)((walkPhase + 1) % sizeof(WALK_SEQ));
+  curFrame = WALK_SEQ[walkPhase];
   drawSpriteAt(curFrame, newPos, orient);
   // 移動で空いた跡を消す
   if (newPos > oldPos) clearColumns(oldPos, newPos);
@@ -326,8 +343,10 @@ static void restorePixel(int16_t sx, int16_t sy) {
     uint8_t localY = sy;
     uint8_t srcX = (currentOrient == 3) ? (IMG_W - 1 - localX) : localX;
     uint8_t srcY = (currentOrient == 3) ? (IMG_H - 1 - localY) : localY;
-    const uint8_t* fullData = getActiveFullFrameData(curFrame);
-    uint8_t palIdx = read4bit(fullData, (uint16_t)srcY * IMG_W + srcX);
+    OvlDesc chain[MAX_OVL_CHAIN];
+    const uint8_t* full;
+    uint8_t depth = buildOvlChain(curFrame, chain, &full);
+    uint8_t palIdx = chainPixelIdx(chain, depth, full, srcX, srcY);
     color = pgm_read_word(&palette[palIdx]);
   } else {
     color = 0x0000;
@@ -467,10 +486,11 @@ void loop() {
     if (now - lastFrameTime >= duration) {
       lastFrameTime = now;
       uint8_t nextFrame = pgm_read_byte(&frames[curFrame].next);
-      if (nextFrame == FRAME_WALK_A) {
+      if (nextFrame == WALK_SEQ[0]) {
         // チェーン終端 (振り向き戻し完了) → 左へ歩き出す
         walkMode = MODE_WALK_OUT;
-        curFrame = FRAME_WALK_A;
+        walkPhase = 0;
+        curFrame = WALK_SEQ[0];
       } else {
         curFrame = nextFrame;
       }
@@ -483,7 +503,8 @@ void loop() {
       lastFrameTime = now;
       walkMode = MODE_WALK_IN;
       spriteX = WALK_ENTER_X;
-      curFrame = FRAME_WALK_A;
+      walkPhase = 0;
+      curFrame = WALK_SEQ[0];
     }
   } else {  // MODE_WALK_IN / MODE_WALK_OUT
     if (now - lastFrameTime >= WALK_STEP_MS) {
