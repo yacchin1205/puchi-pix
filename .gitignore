@@ -7,6 +7,11 @@ puchi_pix_esp32/production/backups/
 puchi_pix_esp32/puchi_pix_esp32-backups/
 *.blend1
 box/*.stl
+!box/box-u.stl
+!box/box-l.stl
+!box/box-esp32-a.stl
+!box/box-esp32-b.stl
+!box/box-esp32-c.stl
 box/*.3mf
 *.kicad_prl
 .playwright-mcp/
