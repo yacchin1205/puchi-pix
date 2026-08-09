@@ -72,7 +72,16 @@
   </div>
 
   <div class="row">
-    <input type="file" id="file" accept="image/gif">
+    <input type="file" id="file" accept="image/*">
+    <select id="size">
+      <option value="auto" selected>サイズ自動</option>
+      <option value="64">64×64</option>
+      <option value="128">128×128</option>
+    </select>
+    <select id="colors">
+      <option value="16" selected>16色 (4bit)</option>
+      <option value="256">256色 (8bit)</option>
+    </select>
     <button id="upload" disabled>Upload</button>
     <button id="revert" disabled>Revert to default</button>
   </div>
@@ -83,7 +92,7 @@
       <canvas id="orig" width="128" height="128"></canvas>
     </div>
     <div>
-      <p>Quantized 64×64 (1st frame preview)</p>
+      <p id="prev-label">Quantized (1st frame preview)</p>
       <canvas id="prev" width="128" height="128"></canvas>
     </div>
   </div>
@@ -100,10 +109,13 @@
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
 
     // ---- Image format constants (must match firmware) ----
-    const MAX_FRAMES  = 16;
-    const IMG_W = 64, IMG_H = 64;
-    const FRAME_BYTES = IMG_W * IMG_H / 2;  // 2048
-    const FRAME_REC   = FRAME_BYTES + 2;    // + uint16 duration
+    // Payload v3: 8B header (magic, version=3, N uint16 LE, size, bpp, reserved)
+    // + palette (16 or 256 x uint16 RGB565) + per-frame records:
+    //   uint16 duration_ms + uint8 flags (bit0 = keyframe)
+    //   keyframe: full pixels[W*H*bpp/8]
+    //   diff:     uint8 rectCount + rects { x, y, w, h + pixels vs prev frame }
+    // No fixed frame cap; the whole payload must fit the firmware buffer.
+    const UPLOAD_BUF = 98368;
     const CHUNK_SIZE  = 200;                 // BLE write chunk
 
     // ---- DOM ----
@@ -131,6 +143,7 @@
     // ---- BLE state ----
     let device, server, uploadChar, commitChar, statusChar;
     let payload = null;
+    let lastComposed = null;  // {composed: [{delay, imageData}], W, H} — for rebuild on size change
 
     // ---- Connect ----
     $('connect').addEventListener('click', async () => {
@@ -175,20 +188,31 @@
     $('file').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      log(`parsing GIF: ${file.name} (${file.size} bytes)`);
+      log(`loading: ${file.name} (${file.size} bytes)`);
       try {
-        const buf = await file.arrayBuffer();
-        const parsed = parseGIF(buf);
-        const frames = decompressFrames(parsed, true);
-        log(`${frames.length} frame(s), canvas ${parsed.lsd.width}x${parsed.lsd.height}`);
-        payload = await buildPayload(parsed, frames);
-        log(`payload built: ${payload.length} bytes (${payload[3]} frames)`);
+        lastComposed = await fileToComposed(file);
+        payload = buildPayload(lastComposed);
+        log(`payload built: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
         if (server && server.connected) $('upload').disabled = false;
       } catch (err) {
         log('parse error:', err.message);
         payload = null;
       }
     });
+
+    // ---- Size / color change: rebuild payload from the last loaded image ----
+    const rebuild = () => {
+      if (!lastComposed) return;
+      try {
+        payload = buildPayload(lastComposed);
+        log(`payload rebuilt: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
+      } catch (err) {
+        log('rebuild error:', err.message);
+        payload = null;
+      }
+    };
+    $('size').addEventListener('change', rebuild);
+    $('colors').addEventListener('change', rebuild);
 
     // ---- Upload ----
     $('upload').addEventListener('click', async () => {
@@ -235,9 +259,32 @@
       }
     });
 
-    // ---- GIF -> payload pipeline ----
+    // ---- Image file -> composed frame list ----
 
-    async function buildPayload(parsed, frames) {
+    async function fileToComposed(file) {
+      if (file.type === 'image/gif') {
+        const buf = await file.arrayBuffer();
+        const parsed = parseGIF(buf);
+        const frames = decompressFrames(parsed, true);
+        log(`${frames.length} frame(s), canvas ${parsed.lsd.width}x${parsed.lsd.height}`);
+        return composeGifFrames(parsed, frames);
+      }
+      // Static image (PNG, JPEG, WebP, ...) -> single frame, alpha flattened onto black
+      const bmp = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      canvas.width = bmp.width; canvas.height = bmp.height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, bmp.width, bmp.height);
+      ctx.drawImage(bmp, 0, 0);
+      log(`static image ${bmp.width}x${bmp.height} (1 frame)`);
+      return {
+        composed: [{ delay: 1000, imageData: ctx.getImageData(0, 0, bmp.width, bmp.height) }],
+        W: bmp.width, H: bmp.height
+      };
+    }
+
+    function composeGifFrames(parsed, frames) {
       const W = parsed.lsd.width, H = parsed.lsd.height;
 
       // Composite each frame onto a full-size canvas (handles patches/dirty rects)
@@ -264,49 +311,146 @@
         // Naive disposal: simulate disposal=2 (clear to bg) by clearing each iteration?
         // No - keep canvas for next frame (simulate disposal=1, leave). Most GIFs assume this.
       }
+      return { composed, W, H };
+    }
 
+    // ---- Composed frames -> payload ----
+
+    function buildPayload({ composed, W, H }) {
       // Show original (1st frame composited)
       drawCanvasTo($('orig'), composed[0].imageData);
 
-      // Limit and resize to 64x64
-      const slice = composed.slice(0, MAX_FRAMES);
-      const resized = slice.map(c => resizeImageData(c.imageData, IMG_W, IMG_H));
+      // Target size: auto picks 128 for sources larger than 64
+      const sel = $('size').value;
+      const size = (sel === 'auto') ? ((W > 64 || H > 64) ? 128 : 64) : parseInt(sel, 10);
+      const K = parseInt($('colors').value, 10);      // 16 or 256
+      const bpp = (K === 256) ? 8 : 4;
+      $('prev-label').textContent = `Quantized ${size}×${size} ${K}色 (1st frame preview)`;
 
-      // Use exact source palette if input already <=16 unique colors, else median cut
-      const palette = buildPalette(resized, 16);
+      const resized = composed.map(c => resizeImageData(c.imageData, size, size));
 
-      // Quantize each frame and 4-bit pack
-      const packed = resized.map(rgba => quantizeAndPack(rgba, palette));
+      // Use exact source palette if input already <=K unique colors, else median cut
+      const palette = buildPalette(resized, K);
+
+      // Quantize and pack each frame
+      const packed = resized.map(rgba => quantizeAndPack(rgba, palette, size, bpp));
 
       // Render preview of 1st packed frame
-      drawPackedTo($('prev'), packed[0], palette);
+      drawPackedTo($('prev'), packed[0], palette, size, bpp);
 
-      // Assemble payload
-      const N = slice.length;
-      const total = 4 + 32 + N * FRAME_REC;
-      const out = new Uint8Array(total);
-      out[0] = 0x50; // 'P'
-      out[1] = 0x50; // 'P'
-      out[2] = 1;    // version
-      out[3] = N;    // frame count
-      for (let i = 0; i < 16; i++) {
-        const [r, g, b] = palette[i];
-        const c565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-        out[4 + i * 2]     = c565 & 0xFF;
-        out[4 + i * 2 + 1] = (c565 >> 8) & 0xFF;
-      }
-      for (let i = 0; i < N; i++) {
-        const off = 4 + 32 + i * FRAME_REC;
+      // Per-frame records: keyframe when first or when the diff isn't smaller
+      const frameBytes = size * size * bpp / 8;
+      let keyframes = 0;
+      const records = packed.map((cur, i) => {
         // gifuct-js delay is already in milliseconds. Clamp / fallback for
         // GIFs that report 0 or absurdly large.
-        let dur = slice[i].delay | 0;
+        let dur = composed[i].delay | 0;
         if (dur < 20) dur = 100;
         if (dur > 65535) dur = 65535;
-        out[off + 0] = dur & 0xFF;
-        out[off + 1] = (dur >> 8) & 0xFF;
-        out.set(packed[i], off + 2);
+        if (i > 0) {
+          const rects = diffRects(packed[i - 1], cur, size, bpp);
+          const diffSize = 1 + rects.reduce((a, r) => a + 4 + r.data.length, 0);
+          if (diffSize < frameBytes) return { dur, rects };
+        }
+        keyframes++;
+        return { dur, full: cur };
+      });
+
+      // Assemble payload (v3)
+      const N = records.length;
+      const palBytes = K * 2;
+      const recSize = r => 3 + (r.full ? frameBytes
+        : 1 + r.rects.reduce((a, rc) => a + 4 + rc.data.length, 0));
+      const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
+      if (total > UPLOAD_BUF) {
+        throw new Error(`payload ${total} B > device buffer ${UPLOAD_BUF} B ` +
+          `(${N} frames at ${size}x${size}/${K}色) — reduce frames, size or colors`);
       }
+
+      const out = new Uint8Array(total);
+      out[0] = 0x50;          // 'P'
+      out[1] = 0x50;          // 'P'
+      out[2] = 3;             // version
+      out[3] = N & 0xFF;      // frame count (uint16 LE)
+      out[4] = (N >> 8) & 0xFF;
+      out[5] = size;
+      out[6] = bpp;
+      out[7] = 0;             // reserved
+      for (let i = 0; i < K; i++) {
+        const [r, g, b] = palette[i];
+        const c565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        out[8 + i * 2]     = c565 & 0xFF;
+        out[8 + i * 2 + 1] = (c565 >> 8) & 0xFF;
+      }
+      let off = 8 + palBytes;
+      for (const r of records) {
+        out[off++] = r.dur & 0xFF;
+        out[off++] = (r.dur >> 8) & 0xFF;
+        out[off++] = r.full ? 1 : 0;   // flags: bit0 = keyframe
+        if (r.full) {
+          out.set(r.full, off);
+          off += frameBytes;
+        } else {
+          out[off++] = r.rects.length;
+          for (const rc of r.rects) {
+            out[off++] = rc.x; out[off++] = rc.y;
+            out[off++] = rc.w; out[off++] = rc.h;
+            out.set(rc.data, off);
+            off += rc.data.length;
+          }
+        }
+      }
+      log(`  ${keyframes} keyframe(s) + ${N - keyframes} diff frame(s), ` +
+        `${(total / N).toFixed(0)} B/frame avg (full: ${frameBytes + 3} B)`);
       return out;
+    }
+
+    const unpackPixel = (p, i, bpp) =>
+      bpp === 8 ? p[i] : ((i & 1) ? (p[i >> 1] & 0x0F) : (p[i >> 1] >> 4));
+
+    // Diff two packed frames: bands of consecutive changed rows, each clipped
+    // to its changed-column extent. Returns [{x, y, w, h, data}]; empty when
+    // the frames are identical. Band count is at most size/2 (< 256).
+    function diffRects(prev, cur, size, bpp) {
+      const rowMin = new Int16Array(size).fill(-1);
+      const rowMax = new Int16Array(size).fill(-1);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = y * size + x;
+          if (unpackPixel(prev, i, bpp) !== unpackPixel(cur, i, bpp)) {
+            if (rowMin[y] < 0) rowMin[y] = x;
+            rowMax[y] = x;
+          }
+        }
+      }
+      const rects = [];
+      for (let y = 0; y < size; ) {
+        if (rowMin[y] < 0) { y++; continue; }
+        let y1 = y, x0 = rowMin[y], x1 = rowMax[y];
+        while (y1 + 1 < size && rowMin[y1 + 1] >= 0) {
+          y1++;
+          x0 = Math.min(x0, rowMin[y1]);
+          x1 = Math.max(x1, rowMax[y1]);
+        }
+        rects.push(packRect(cur, size, bpp, x0, y, x1 - x0 + 1, y1 - y + 1));
+        y = y1 + 1;
+      }
+      return rects;
+    }
+
+    function packRect(cur, size, bpp, x, y, w, h) {
+      const n = w * h;
+      const data = new Uint8Array(bpp === 8 ? n : (n + 1) >> 1);
+      let k = 0;
+      for (let dy = 0; dy < h; dy++) {
+        for (let dx = 0; dx < w; dx++, k++) {
+          const v = unpackPixel(cur, (y + dy) * size + x + dx, bpp);
+          if (bpp === 8) data[k] = v;
+          else if (k & 1) data[k >> 1] |= v;
+          else data[k >> 1] = v << 4;
+        }
+      }
+      return { x, y, w, h, data };
     }
 
     function resizeImageData(imageData, w, h) {
@@ -386,8 +530,9 @@
       });
     }
 
-    function quantizeAndPack(rgba, palette) {
+    function quantizeAndPack(rgba, palette, size, bpp) {
       // RGB565 quantization: snap palette to RGB565 first, then map source to nearest
+      const K = palette.length;
       const pal565 = palette.map(([r, g, b]) => {
         const r5 = (r >> 3) & 0x1F, g6 = (g >> 2) & 0x3F, b5 = (b >> 3) & 0x1F;
         return [
@@ -396,22 +541,34 @@
           (b5 << 3) | (b5 >> 2)
         ];
       });
-      const out = new Uint8Array(IMG_W * IMG_H / 2);
-      for (let i = 0; i < IMG_W * IMG_H; i++) {
+      const npx = size * size;
+      const out = new Uint8Array(bpp === 8 ? npx : npx / 2);
+      const memo = new Map();  // color -> palette index
+      for (let i = 0; i < npx; i++) {
         const r = rgba[i * 4 + 0];
         const g = rgba[i * 4 + 1];
         const b = rgba[i * 4 + 2];
-        let bestIdx = 0, bestDist = Infinity;
-        for (let p = 0; p < 16; p++) {
-          const dr = r - pal565[p][0];
-          const dg = g - pal565[p][1];
-          const db = b - pal565[p][2];
-          const d = dr * dr + dg * dg + db * db;
-          if (d < bestDist) { bestDist = d; bestIdx = p; }
+        const key = (r << 16) | (g << 8) | b;
+        let bestIdx = memo.get(key);
+        if (bestIdx === undefined) {
+          let bestDist = Infinity;
+          bestIdx = 0;
+          for (let p = 0; p < K; p++) {
+            const dr = r - pal565[p][0];
+            const dg = g - pal565[p][1];
+            const db = b - pal565[p][2];
+            const d = dr * dr + dg * dg + db * db;
+            if (d < bestDist) { bestDist = d; bestIdx = p; }
+          }
+          memo.set(key, bestIdx);
         }
-        const byteIdx = i >> 1;
-        if (i & 1) out[byteIdx] = (out[byteIdx] & 0xF0) | (bestIdx & 0x0F);
-        else       out[byteIdx] = (out[byteIdx] & 0x0F) | ((bestIdx & 0x0F) << 4);
+        if (bpp === 8) {
+          out[i] = bestIdx;
+        } else {
+          const byteIdx = i >> 1;
+          if (i & 1) out[byteIdx] = (out[byteIdx] & 0xF0) | (bestIdx & 0x0F);
+          else       out[byteIdx] = (out[byteIdx] & 0x0F) | ((bestIdx & 0x0F) << 4);
+        }
       }
       return out;
     }
@@ -427,14 +584,19 @@
       ctx.drawImage(tmp, 0, 0, targetCanvas.width, targetCanvas.height);
     }
 
-    function drawPackedTo(targetCanvas, packed, palette) {
+    function drawPackedTo(targetCanvas, packed, palette, size, bpp) {
       const tmp = document.createElement('canvas');
-      tmp.width = IMG_W; tmp.height = IMG_H;
+      tmp.width = size; tmp.height = size;
       const tctx = tmp.getContext('2d');
-      const id = tctx.createImageData(IMG_W, IMG_H);
-      for (let i = 0; i < IMG_W * IMG_H; i++) {
-        const byte = packed[i >> 1];
-        const palIdx = (i & 1) ? (byte & 0x0F) : (byte >> 4);
+      const id = tctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        let palIdx;
+        if (bpp === 8) {
+          palIdx = packed[i];
+        } else {
+          const byte = packed[i >> 1];
+          palIdx = (i & 1) ? (byte & 0x0F) : (byte >> 4);
+        }
         const [r, g, b] = palette[palIdx];
         id.data[i * 4 + 0] = r;
         id.data[i * 4 + 1] = g;

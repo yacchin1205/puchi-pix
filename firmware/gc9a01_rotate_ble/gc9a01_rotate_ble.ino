@@ -14,14 +14,40 @@
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
 //
 // Payload (sent via Upload, raw bytes appended in order):
-//   [0..1]    Magic 'PP' (0x50 0x50)
-//   [2]       Version = 1
-//   [3]       Frame count N (1..16)
-//   [4..35]   Palette: 16 x uint16 RGB565, little-endian (32 B)
-//   [36..]    Per frame:
-//               uint16 duration_ms (LE)
-//               uint8  data[2048]   (4-bit packed 64x64; even idx = high nibble)
-//   Total = 4 + 32 + N*2050 bytes  (max 32868 at N=16)
+//   v1 (64x64 fixed):
+//     [0..1]  Magic 'PP' (0x50 0x50)
+//     [2]     Version = 1
+//     [3]     Frame count N (1..16)
+//     [4..35] Palette: 16 x uint16 RGB565, little-endian (32 B)
+//     [36..]  Per frame: uint16 duration_ms (LE) + data[2048] (4-bit packed)
+//   v2 (64x64 or 128x128, 16 or 256 colors):
+//     [0..1]  Magic 'PP'
+//     [2]     Version = 2
+//     [3]     Frame count N
+//     [4]     Image width  (64 or 128)
+//     [5]     Image height (must equal width)
+//     [6]     Bits per pixel: 0 or 4 = 16-color, 8 = 256-color
+//     [7]     Reserved (0)
+//     [8..]   Palette: 16 (4bpp, 32 B) or 256 (8bpp, 512 B) x uint16 RGB565 LE
+//     then    Per frame: uint16 duration_ms (LE) + data[W*H*bpp/8]
+//             (4bpp: packed 2px/byte, even idx = high nibble; 8bpp: 1px/byte)
+//   v3 (diff chain; 64x64 or 128x128, 16 or 256 colors):
+//     [0..1]  Magic 'PP'
+//     [2]     Version = 3
+//     [3..4]  Frame count N (uint16 LE, >= 1)
+//     [5]     Image size (64 or 128, square)
+//     [6]     Bits per pixel: 4 = 16-color, 8 = 256-color
+//     [7]     Reserved (0)
+//     [8..]   Palette: 16 (4bpp, 32 B) or 256 (8bpp, 512 B) x uint16 RGB565 LE
+//     then    Per frame: uint16 duration_ms (LE) + uint8 flags (bit0 = keyframe)
+//             keyframe: data[W*H*bpp/8] (full frame)
+//             diff:     uint8 rectCount + rectCount x
+//                       { rx, ry, rw, rh (uint8) + data[ceil(rw*rh*bpp/8)] }
+//             Diffs apply onto the previously composed frame; frame 0 must be
+//             a keyframe. Playback is sequential and wraps to frame 0.
+//   v1/v2 frame count is additionally bounded by the upload buffer (98368 B):
+//   64x64 -> 16 frames either depth; 128x128 -> 12 (16-color) / 5 (256-color).
+//   v3 has no fixed frame cap; the payload just has to fit the buffer.
 //
 // BLE is active only while awake. Deep-sleep entry stops the radio implicitly.
 //
@@ -82,15 +108,23 @@ static constexpr int HEIGHT = 240;
 #include "../puchi_pix/frame.h"
 #include "../puchi_pix/icon_original.h"
 
-static constexpr uint16_t FRAME_BYTES = (uint16_t)IMG_W * IMG_H / 2;  // 2048 for 64x64 4-bit
-static constexpr uint16_t FRAME_REC   = FRAME_BYTES + 2;              // + uint16 duration
-static constexpr size_t UPLOAD_BUF_SIZE = 4 + 32 + (size_t)MAX_UPLOADED_FRAMES * FRAME_REC;  // 32868
+static constexpr uint16_t MAX_IMG_SIZE = 128;
 
-// 64x64 source -> 128x128 visible (fits 240 disc with rotation, diagonal 181)
+// 12 frames of 128x128 (or 16 of 64x64) + v2 header. Kept below the full
+// 16x128x128 (131 KB) so enough heap remains for the Bluedroid BLE stack.
+static constexpr size_t UPLOAD_BUF_SIZE = 8 + 32 + 12u * ((size_t)MAX_IMG_SIZE * MAX_IMG_SIZE / 2 + 2);  // 98368
+
+// All sources are pixel-doubled (shift 1).
+// 64x64  -> 128x128 visible; rotated corners sweep a 181px diagonal, so the
+//           output window is 192x192 (black outside the sprite erases trails).
+// 128x128 -> 256x256 visible, cropped to the full 240x240 window. Its inscribed
+//           circle (256px) always covers the 240px disc, so no black corners
+//           and every visible pixel maps inside the source (radius 120/2 = 60 < 64).
 static constexpr uint8_t SCALE_SHIFT = 1;
-static constexpr int16_t OUT_SIZE = (IMG_W << SCALE_SHIFT) + 64;  // 192
-static constexpr int16_t OUT_HALF = OUT_SIZE / 2;
-static constexpr int16_t SRC_HALF = IMG_W / 2;
+
+// Active source dimensions (updated when the image source switches)
+static uint8_t srcSize  = IMG_W;  // 64 or 128
+static int16_t outSize  = 192;    // output window: 192 (64src) or 240 (128src)
 
 // ---- 64-step rotation table (Q15) ----
 static const int16_t COS64[64] = {
@@ -220,7 +254,7 @@ static inline uint8_t read4bit(const uint8_t* data, uint16_t idx) {
   return (idx & 1) ? (b & 0x0F) : (b >> 4);
 }
 
-static inline uint8_t read4bitRam(const uint8_t* data, uint16_t idx) {
+static inline uint8_t read4bitRam(const uint8_t* data, uint32_t idx) {
   uint8_t b = data[idx >> 1];
   return (idx & 1) ? (b & 0x0F) : (b >> 4);
 }
@@ -232,7 +266,7 @@ static volatile uint8_t uploadStatus = STATUS_IDLE;
 static volatile bool bleConnected = false;
 static volatile bool uploadCommittedFlag = false;
 static volatile bool uploadedActive = false;
-static volatile uint8_t uploadedFrameCount = 0;
+static volatile uint16_t uploadedFrameCount = 0;
 
 // Deferred persistence flags (set in BLE callbacks, applied in loop()).
 static volatile bool persistRequested = false;
@@ -240,16 +274,31 @@ static volatile bool clearPersistRequested = false;
 
 #define IMG_PATH "/img.bin"
 
+// Layout of the validated upload (set by validateUpload)
+static uint8_t  upVer      = 2;     // payload version (1, 2 or 3)
+static uint8_t  upSize     = 64;    // image dimension (square)
+static uint8_t  upBpp      = 4;     // bits per pixel (4 or 8)
+static uint32_t upPalOff   = 4;     // palette byte offset
+static uint32_t upDataOff  = 36;    // first frame record byte offset
+static uint32_t upFrameRec = 2050;  // v1/v2: bytes per frame record (duration + data)
+static uint32_t upCurRec   = 0;     // v3: byte offset of the current frame's record
+
 // Accessors over uploadBuf
 static inline const uint16_t* uploadedPalette() {
-  return (const uint16_t*)&uploadBuf[4];
+  return (const uint16_t*)&uploadBuf[upPalOff];
 }
 static inline const uint8_t* uploadedFrameData(uint8_t idx) {
-  return &uploadBuf[4 + 32 + (uint32_t)idx * FRAME_REC + 2];
+  return &uploadBuf[upDataOff + (uint32_t)idx * upFrameRec + 2];
 }
 static inline uint16_t uploadedFrameDuration(uint8_t idx) {
-  const uint8_t* p = &uploadBuf[4 + 32 + (uint32_t)idx * FRAME_REC];
+  const uint8_t* p = &uploadBuf[upDataOff + (uint32_t)idx * upFrameRec];
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+// Point the renderer at the active source's dimensions
+static void applyActiveSource() {
+  srcSize = uploadedActive ? upSize : IMG_W;
+  outSize = (srcSize == 128) ? 240 : 192;
 }
 
 // ---- Compose dispatchers ----
@@ -281,34 +330,94 @@ static void composeFrameFromProgmem(uint8_t frameIdx, uint16_t* buf) {
   }
 }
 
-static void composeFrameFromUpload(uint8_t frameIdx, uint16_t* buf) {
+static void composeFrameFromUpload(uint16_t frameIdx, uint16_t* buf) {
   if (frameIdx >= uploadedFrameCount) frameIdx = 0;
   const uint16_t* pal = uploadedPalette();
   const uint8_t* data = uploadedFrameData(frameIdx);
-  for (uint16_t i = 0; i < IMG_W * IMG_H; i++) {
-    buf[i] = pal[read4bitRam(data, i)];
+  uint32_t n = (uint32_t)upSize * upSize;
+  if (upBpp == 8) {
+    for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+  } else {
+    for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
   }
 }
 
-static void composeFrame(uint8_t frameIdx, uint16_t* buf) {
+static void composeFrame(uint16_t frameIdx, uint16_t* buf) {
   if (uploadedActive) composeFrameFromUpload(frameIdx, buf);
-  else                composeFrameFromProgmem(frameIdx, buf);
+  else                composeFrameFromProgmem((uint8_t)frameIdx, buf);
+}
+
+// ---- v3 (diff chain) record helpers ----
+// Record offsets passed here are trusted: validateUpload() walks the full
+// record chain on commit and rejects any out-of-bounds rect or truncation.
+
+static inline uint32_t v3FrameBytes() {
+  return (uint32_t)upSize * upSize * upBpp / 8;
+}
+
+static inline uint32_t v3RectDataBytes(uint8_t rw, uint8_t rh) {
+  uint32_t px = (uint32_t)rw * rh;
+  return (upBpp == 8) ? px : ((px + 1) >> 1);
+}
+
+static uint32_t v3NextRecord(uint32_t off) {
+  if (uploadBuf[off + 2] & 0x01) return off + 3 + v3FrameBytes();
+  uint8_t rectCount = uploadBuf[off + 3];
+  uint32_t p = off + 4;
+  for (uint8_t r = 0; r < rectCount; r++)
+    p += 4 + v3RectDataBytes(uploadBuf[p + 2], uploadBuf[p + 3]);
+  return p;
+}
+
+static uint16_t v3Duration(uint32_t off) {
+  return (uint16_t)uploadBuf[off] | ((uint16_t)uploadBuf[off + 1] << 8);
+}
+
+// Keyframe: full decode into buf. Diff: rect patches applied over buf, which
+// must still hold the previously composed frame.
+static void v3Decode(uint32_t off, uint16_t* buf) {
+  const uint16_t* pal = uploadedPalette();
+  if (uploadBuf[off + 2] & 0x01) {
+    const uint8_t* data = &uploadBuf[off + 3];
+    uint32_t n = (uint32_t)upSize * upSize;
+    if (upBpp == 8) {
+      for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+    } else {
+      for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
+    }
+    return;
+  }
+  uint8_t rectCount = uploadBuf[off + 3];
+  uint32_t p = off + 4;
+  for (uint8_t r = 0; r < rectCount; r++) {
+    uint8_t rx = uploadBuf[p], ry = uploadBuf[p + 1];
+    uint8_t rw = uploadBuf[p + 2], rh = uploadBuf[p + 3];
+    const uint8_t* data = &uploadBuf[p + 4];
+    uint32_t i = 0;
+    for (uint8_t dy = 0; dy < rh; dy++) {
+      uint16_t* row = &buf[(uint32_t)(ry + dy) * upSize + rx];
+      for (uint8_t dx = 0; dx < rw; dx++, i++)
+        row[dx] = pal[(upBpp == 8) ? data[i] : read4bitRam(data, i)];
+    }
+    p += 4 + v3RectDataBytes(rw, rh);
+  }
 }
 
 // Frame metadata accessors (dispatch source).
-static uint16_t getDuration(uint8_t idx) {
+static uint16_t getDuration(uint16_t idx) {
   if (uploadedActive) {
+    if (upVer == 3) return v3Duration(upCurRec);
     if (idx >= uploadedFrameCount) idx = 0;
     return uploadedFrameDuration(idx);
   }
   return pgm_read_word(&frames[idx].duration_ms);
 }
 
-static uint8_t getNextFrame(uint8_t idx) {
+static uint16_t getNextFrame(uint16_t idx) {
   if (uploadedActive) {
-    uint8_t n = uploadedFrameCount;
+    uint16_t n = uploadedFrameCount;
     if (n == 0) return 0;
-    return (uint8_t)((idx + 1) % n);
+    return (uint16_t)((idx + 1) % n);
   }
   return pgm_read_byte(&frames[idx].next);
 }
@@ -318,23 +427,26 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
   const int32_t cosT = COS64[bin & 0x3F];
   const int32_t sinT = SIN64[bin & 0x3F];
 
-  const uint16_t ox0 = (WIDTH - OUT_SIZE) / 2;
-  const uint16_t oy0 = (HEIGHT - OUT_SIZE) / 2;
-  setWindow(ox0, oy0, ox0 + OUT_SIZE - 1, oy0 + OUT_SIZE - 1);
+  const int16_t outHalf = outSize / 2;
+  const uint16_t ox0 = (WIDTH - outSize) / 2;
+  const uint16_t oy0 = (HEIGHT - outSize) / 2;
+  setWindow(ox0, oy0, ox0 + outSize - 1, oy0 + outSize - 1);
 
   const int8_t SHIFT = 15 + SCALE_SHIFT;
+  const int16_t srcHalf = srcSize / 2;
+  const uint16_t sz = srcSize;
 
-  for (int16_t oy = 0; oy < OUT_SIZE; oy++) {
-    int32_t cy = oy - OUT_HALF;
+  for (int16_t oy = 0; oy < outSize; oy++) {
+    int32_t cy = oy - outHalf;
     int32_t cySin = cy * sinT;
     int32_t cyCos = cy * cosT;
-    for (int16_t ox = 0; ox < OUT_SIZE; ox++) {
-      int32_t cx = ox - OUT_HALF;
-      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + SRC_HALF;
-      int16_t sy = (int16_t)(((-cx * sinT) + cyCos) >> SHIFT) + SRC_HALF;
+    for (int16_t ox = 0; ox < outSize; ox++) {
+      int32_t cx = ox - outHalf;
+      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + srcHalf;
+      int16_t sy = (int16_t)(((-cx * sinT) + cyCos) >> SHIFT) + srcHalf;
       uint16_t c;
-      if ((uint16_t)sx < (uint16_t)IMG_W && (uint16_t)sy < (uint16_t)IMG_H) {
-        c = src[(uint16_t)sy * IMG_W + sx];
+      if ((uint16_t)sx < sz && (uint16_t)sy < sz) {
+        c = src[(uint32_t)sy * sz + sx];
       } else {
         c = 0x0000;
       }
@@ -599,13 +711,42 @@ static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
 static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
 
 // ---- State ----
-static uint8_t curFrame = 0;
+static uint16_t curFrame = 0;
 static uint8_t curAbsBin = MOUNT_NEUTRAL_BIN;
 static uint8_t currentBin = 0;
 static uint32_t lastFrameTime = 0;
-static uint16_t frameBuf[IMG_W * IMG_H];
+static uint16_t frameBuf[(uint32_t)MAX_IMG_SIZE * MAX_IMG_SIZE];
 static int16_t xRef = 0, yRef = 0, zRef = 0;
 static int32_t fxLp = 0, fyLp = 0;
+
+// Reset playback to frame 0 and compose it into frameBuf.
+static void animReset() {
+  curFrame = 0;
+  if (uploadedActive && upVer == 3) {
+    upCurRec = upDataOff;
+    v3Decode(upCurRec, frameBuf);
+  } else {
+    composeFrame(0, frameBuf);
+  }
+}
+
+// Advance to the next frame. frameBuf always holds the current composed
+// frame, so v3 only patches the diff rects; other sources recompose fully.
+static void animAdvance() {
+  if (uploadedActive && upVer == 3) {
+    if ((uint16_t)(curFrame + 1) < uploadedFrameCount) {
+      curFrame++;
+      upCurRec = v3NextRecord(upCurRec);
+    } else {
+      curFrame = 0;
+      upCurRec = upDataOff;
+    }
+    v3Decode(upCurRec, frameBuf);
+  } else {
+    curFrame = getNextFrame(curFrame);
+    composeFrame(curFrame, frameBuf);
+  }
+}
 
 static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
   uint8_t bestBin = 0;
@@ -640,11 +781,82 @@ static void setStatus(uint8_t s) {
 static bool validateUpload() {
   if (uploadPos < 4) return false;
   if (uploadBuf[0] != 'P' || uploadBuf[1] != 'P') return false;
-  if (uploadBuf[2] != 1) return false;
-  uint8_t n = uploadBuf[3];
-  if (n == 0 || n > MAX_UPLOADED_FRAMES) return false;
-  uint32_t expected = 4 + 32 + (uint32_t)n * FRAME_REC;
-  return uploadPos == expected;
+  uint8_t ver = uploadBuf[2];
+
+  uint16_t n;
+  uint16_t size;
+  uint8_t bpp;
+  uint32_t palOff;
+  if (ver == 1) {           // legacy: 64x64, 16-color fixed
+    n = uploadBuf[3];
+    if (n == 0 || n > MAX_UPLOADED_FRAMES) return false;
+    size = 64; bpp = 4; palOff = 4;
+  } else if (ver == 2) {    // sized: 64 or 128, square, 16 or 256 colors
+    if (uploadPos < 8) return false;
+    n = uploadBuf[3];
+    if (n == 0 || n > MAX_UPLOADED_FRAMES) return false;
+    size = uploadBuf[4];
+    if ((size != 64 && size != 128) || uploadBuf[5] != size) return false;
+    bpp = uploadBuf[6];
+    if (bpp == 0) bpp = 4;
+    if (bpp != 4 && bpp != 8) return false;
+    palOff = 8;
+  } else if (ver == 3) {    // diff chain: keyframes + rect patches
+    if (uploadPos < 8) return false;
+    n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
+    if (n == 0) return false;
+    size = uploadBuf[5];
+    if (size != 64 && size != 128) return false;
+    bpp = uploadBuf[6];
+    if (bpp != 4 && bpp != 8) return false;
+    palOff = 8;
+  } else {
+    return false;
+  }
+
+  uint32_t palBytes = (bpp == 8) ? 512 : 32;
+  uint32_t dataOff = palOff + palBytes;
+
+  if (ver == 3) {
+    // Walk every record; playback trusts these offsets and rect bounds.
+    uint32_t frameBytes = (uint32_t)size * size * bpp / 8;
+    uint32_t off = dataOff;
+    for (uint16_t i = 0; i < n; i++) {
+      if (off + 3 > uploadPos) return false;
+      if (uploadBuf[off + 2] & 0x01) {
+        off += 3 + frameBytes;
+      } else {
+        if (i == 0) return false;  // frame 0 must be a keyframe
+        if (off + 4 > uploadPos) return false;
+        uint8_t rectCount = uploadBuf[off + 3];
+        off += 4;
+        for (uint8_t r = 0; r < rectCount; r++) {
+          if (off + 4 > uploadPos) return false;
+          uint8_t rw = uploadBuf[off + 2], rh = uploadBuf[off + 3];
+          if (rw == 0 || rh == 0) return false;
+          if ((uint16_t)uploadBuf[off] + rw > size) return false;
+          if ((uint16_t)uploadBuf[off + 1] + rh > size) return false;
+          uint32_t px = (uint32_t)rw * rh;
+          off += 4 + ((bpp == 8) ? px : ((px + 1) >> 1));
+        }
+      }
+      if (off > uploadPos) return false;
+    }
+    if (off != uploadPos) return false;
+  } else {
+    uint32_t rec = (uint32_t)size * size * bpp / 8 + 2;
+    uint32_t expected = dataOff + (uint32_t)n * rec;
+    if (expected > UPLOAD_BUF_SIZE || uploadPos != expected) return false;
+    upFrameRec = rec;
+  }
+
+  upVer = ver;
+  upSize = size;
+  upBpp = bpp;
+  upPalOff = palOff;
+  upDataOff = dataOff;
+  uploadedFrameCount = n;
+  return true;
 }
 
 // ---- Persistence (LittleFS) ----
@@ -687,8 +899,8 @@ static LoadResult loadPersistedImage() {
     LittleFS.remove(IMG_PATH);
     return LOAD_INVALID;
   }
-  uploadedFrameCount = uploadBuf[3];
   uploadedActive = true;
+  applyActiveSource();
   return LOAD_OK;
 }
 
@@ -748,6 +960,14 @@ class UploadCB : public BLECharacteristicCallbacks {
       setStatus(STATUS_ERROR);
       return;
     }
+    // The incoming payload overwrites the active image's backing store, so
+    // playback must not keep reading a half-written buffer (v3 record offsets
+    // would walk garbage). Fall back to the default animation until commit.
+    if (uploadPos == 0 && uploadedActive) {
+      uploadedActive = false;
+      applyActiveSource();
+      uploadCommittedFlag = true;
+    }
     memcpy(&uploadBuf[uploadPos], data, len);
     uploadPos += len;
     setStatus(STATUS_RECEIVING);
@@ -762,8 +982,8 @@ class CommitCB : public BLECharacteristicCallbacks {
     switch (cmd) {
       case 0x01:  // commit
         if (validateUpload()) {
-          uploadedFrameCount = uploadBuf[3];
           uploadedActive = true;
+          applyActiveSource();
           uploadCommittedFlag = true;
           persistRequested = true;
           setStatus(STATUS_SUCCESS);
@@ -777,6 +997,7 @@ class CommitCB : public BLECharacteristicCallbacks {
         break;
       case 0x03:  // revert to default
         uploadedActive = false;
+        applyActiveSource();
         uploadCommittedFlag = true;
         clearPersistRequested = true;
         setStatus(STATUS_IDLE);
@@ -853,7 +1074,6 @@ void setup() {
   enableWakeupInterrupt();
   esp_deep_sleep_enable_gpio_wakeup(BIT(KXTJ3_INT_PIN), ESP_GPIO_WAKEUP_GPIO_LOW);
 
-  curFrame = 0;
   curAbsBin = MOUNT_NEUTRAL_BIN;
   currentBin = 0;
   fxLp = (int32_t)xRef * ACCEL_X_SIGN;
@@ -868,7 +1088,7 @@ void setup() {
 
   bleSetup();
 
-  composeFrame(curFrame, frameBuf);
+  animReset();
   drawFrameRotated(frameBuf, currentBin);
 }
 
@@ -892,9 +1112,9 @@ void loop() {
   // Apply pending image source switch (commit or revert).
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
-    curFrame = 0;
     lastFrameTime = now;
-    composeFrame(curFrame, frameBuf);
+    fillScreen(0x0000);  // clear stale pixels outside the new output window
+    animReset();
     drawFrameRotated(frameBuf, currentBin);
   }
 
@@ -936,11 +1156,10 @@ void loop() {
   bool frameAdvance = (now - lastFrameTime >= duration);
   if (frameAdvance) {
     lastFrameTime = now;
-    curFrame = getNextFrame(curFrame);
+    animAdvance();
   }
 
   if (frameAdvance || binChanged) {
-    composeFrame(curFrame, frameBuf);
     drawFrameRotated(frameBuf, currentBin);
   }
 }
