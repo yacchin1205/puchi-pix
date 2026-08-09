@@ -678,10 +678,11 @@ static void calibrateKXTJ3(int16_t &xRef, int16_t &yRef, int16_t &zRef) {
 
 // ---- Tilt-to-bin ----
 
-static constexpr int ACCEL_X_SIGN = 1;
+// Board is mounted flipped (component side reversed): X mirrors, Z unused.
+static constexpr int ACCEL_X_SIGN = -1;
 static constexpr int ACCEL_Y_SIGN = 1;
 static constexpr int BIN_DIR_SIGN = -1;
-static constexpr uint8_t MOUNT_NEUTRAL_BIN = 48;
+static constexpr uint8_t MOUNT_NEUTRAL_BIN = 0;
 
 static constexpr uint8_t LP_SHIFT = 3;
 static constexpr int32_t MAG2_MIN = 24000000L;
