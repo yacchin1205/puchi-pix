@@ -695,7 +695,12 @@ static constexpr int ACCEL_Y_SIGN = 1;
 static constexpr int BIN_DIR_SIGN = -1;
 static constexpr uint8_t MOUNT_NEUTRAL_BIN = 0;
 
-static constexpr uint8_t LP_SHIFT = 3;
+// Gravity lowpass time constant. Loop period varies widely (sub-ms idle,
+// tens of ms during a redraw), so the filter scales its blend factor by
+// elapsed time instead of using a fixed per-sample weight. 200 ms attenuates
+// hand tremor and linear-acceleration wobble that the old ~10 ms-equivalent
+// EMA passed straight through.
+static constexpr int32_t LP_TAU_MS = 200;
 static constexpr int32_t MAG2_MIN = 24000000L;
 static constexpr uint8_t HYSTERESIS_SHIFT = 8;
 
@@ -730,6 +735,7 @@ static uint32_t lastFrameTime = 0;
 static uint16_t frameBuf[(uint32_t)MAX_IMG_SIZE * MAX_IMG_SIZE];
 static int16_t xRef = 0, yRef = 0, zRef = 0;
 static int32_t fxLp = 0, fyLp = 0;
+static uint32_t lastLpUpdateMs = 0;
 
 // Reset playback to frame 0 and compose it into frameBuf.
 static void animReset() {
@@ -1092,6 +1098,7 @@ void setup() {
   fyLp = (int32_t)yRef * ACCEL_Y_SIGN;
   lastFrameTime = millis();
   lastActivityMs = millis();
+  lastLpUpdateMs = millis();
 
   // Restore persisted image (if present and valid). Falls back to default.
   // Surfaces filesystem / corruption errors via a colored splash.
@@ -1141,13 +1148,20 @@ void loop() {
     clearPersistedImage();
   }
 
-  // Update lowpass on raw gravity vector
+  // Update lowpass on raw gravity vector. Blend factor is dt/tau so the
+  // effective time constant stays ~LP_TAU_MS whether the loop is spinning
+  // at sub-ms (no redraw) or stalled tens of ms by a frame write.
   int16_t rx, ry, rz;
   if (readXYZRaw(rx, ry, rz)) {
     int32_t fx = (int32_t)rx * ACCEL_X_SIGN;
     int32_t fy = (int32_t)ry * ACCEL_Y_SIGN;
-    fxLp = (fxLp * ((1 << LP_SHIFT) - 1) + fx) >> LP_SHIFT;
-    fyLp = (fyLp * ((1 << LP_SHIFT) - 1) + fy) >> LP_SHIFT;
+    int32_t dt = (int32_t)(now - lastLpUpdateMs);
+    if (dt > 0) {
+      if (dt > LP_TAU_MS) dt = LP_TAU_MS;
+      lastLpUpdateMs = now;
+      fxLp += (fx - fxLp) * dt / LP_TAU_MS;
+      fyLp += (fy - fyLp) * dt / LP_TAU_MS;
+    }
   }
 
   int32_t mag2 = fxLp * fxLp + fyLp * fyLp;
