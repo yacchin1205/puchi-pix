@@ -253,6 +253,11 @@ static inline void writePixel(uint16_t c) {
   SPI.transfer(c & 0xFF);
 }
 
+// Shared row buffer for bulk transfers. SPI.writePixels() sends each 16-bit
+// value MSB-first (same wire order as writePixel), so pixels are stored in
+// native endianness. One row of the full panel width is the largest unit.
+static uint16_t txRowBuf[WIDTH];
+
 static inline uint8_t read4bit(const uint8_t* data, uint16_t idx) {
   uint8_t b = pgm_read_byte(&data[idx >> 1]);
   return (idx & 1) ? (b & 0x0F) : (b >> 4);
@@ -454,16 +459,18 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
       } else {
         c = 0x0000;
       }
-      writePixel(c);
+      txRowBuf[ox] = c;
     }
+    SPI.writePixels(txRowBuf, (uint32_t)outSize * 2);
   }
   digitalWrite(TFT_CS, HIGH);
 }
 
 static void fillScreen(uint16_t color) {
   setWindow(0, 0, WIDTH - 1, HEIGHT - 1);
-  for (uint32_t i = 0; i < (uint32_t)WIDTH * HEIGHT; i++)
-    writePixel(color);
+  for (int16_t i = 0; i < WIDTH; i++) txRowBuf[i] = color;
+  for (int16_t y = 0; y < HEIGHT; y++)
+    SPI.writePixels(txRowBuf, (uint32_t)WIDTH * 2);
   digitalWrite(TFT_CS, HIGH);
 }
 
