@@ -88,6 +88,15 @@
     <button id="revert" disabled>Revert to default</button>
   </div>
 
+  <div class="row" id="range-row" hidden>
+    <label>フレーム範囲
+      <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
+      –
+      <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
+    </label>
+    <span id="f-total" class="pill"></span>
+  </div>
+
   <div class="panel">
     <div>
       <p>Original (1st frame)</p>
@@ -186,13 +195,33 @@
       }
     });
 
+    // ---- Frame range selection ----
+    const resetFrameRange = (n) => {
+      $('range-row').hidden = (n <= 1);
+      $('f-start').max = n; $('f-start').value = 1;
+      $('f-end').max = n;   $('f-end').value = n;
+      $('f-total').textContent = `全${n}フレーム`;
+    };
+
+    // Read the selected range as [start, end] (1-based, inclusive), clamped
+    // to [1, n] and normalized so start <= end; writes clamps back to the UI.
+    const frameRange = (n) => {
+      let s = Math.min(Math.max($('f-start').value | 0, 1), n);
+      let e = Math.min(Math.max($('f-end').value | 0, 1), n);
+      if (s > e) [s, e] = [e, s];
+      $('f-start').value = s;
+      $('f-end').value = e;
+      return [s, e];
+    };
+
     // ---- File pick / background change: (re)compose and build ----
     let lastFile = null;
 
-    const recompose = async () => {
+    const recompose = async (resetRange = false) => {
       if (!lastFile) return;
       try {
         lastComposed = await fileToComposed(lastFile);
+        if (resetRange) resetFrameRange(lastComposed.composed.length);
         payload = buildPayload(lastComposed);
         log(`payload built: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
         if (server && server.connected) $('upload').disabled = false;
@@ -207,7 +236,7 @@
       if (!file) return;
       log(`loading: ${file.name} (${file.size} bytes)`);
       lastFile = file;
-      await recompose();
+      await recompose(true);
     });
     $('bg').addEventListener('change', recompose);
 
@@ -224,6 +253,8 @@
     };
     $('size').addEventListener('change', rebuild);
     $('colors').addEventListener('change', rebuild);
+    $('f-start').addEventListener('change', rebuild);
+    $('f-end').addEventListener('change', rebuild);
 
     // ---- Upload ----
     $('upload').addEventListener('click', async () => {
@@ -338,8 +369,16 @@
 
     // ---- Composed frames -> payload ----
 
-    function buildPayload({ composed, W, H }) {
-      // Show original (1st frame composited)
+    function buildPayload({ composed: allFrames, W, H }) {
+      // Restrict to the selected frame range (lets oversized GIFs fit the
+      // device buffer by uploading a portion of the animation)
+      const [fs, fe] = frameRange(allFrames.length);
+      const composed = allFrames.slice(fs - 1, fe);
+      if (composed.length < allFrames.length) {
+        log(`  frame range ${fs}–${fe} of ${allFrames.length}`);
+      }
+
+      // Show original (1st frame of the selected range, composited)
       drawCanvasTo($('orig'), composed[0].imageData);
 
       // Target size: auto picks 120 (full display coverage) for sources
@@ -388,7 +427,7 @@
       const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
       if (total > UPLOAD_BUF) {
         throw new Error(`payload ${total} B > device buffer ${UPLOAD_BUF} B ` +
-          `(${N} frames at ${size}x${size}/${K}色) — reduce frames, size or colors`);
+          `(${N} frames at ${size}x${size}/${K}色) — フレーム範囲を狭めるか、サイズ/色数を減らしてください`);
       }
 
       const out = new Uint8Array(total);
