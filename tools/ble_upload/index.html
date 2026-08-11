@@ -73,12 +73,12 @@
 
   <div class="row">
     <input type="file" id="file" accept="image/*">
-    <label>背景色 <input type="color" id="bg" value="#000000" title="透明部分とdisposalクリアの塗り色"></label>
+    <label><span id="bg-label">背景色</span> <input type="color" id="bg" value="#000000"></label>
     <select id="size">
       <option value="auto" selected>サイズ自動</option>
       <option value="64">64×64</option>
       <option value="120">120×120</option>
-      <option value="128">128×128 (端4pxは表示外)</option>
+      <option value="128">128×128</option>
     </select>
     <select id="colors">
       <option value="16" selected>16色 (4bit)</option>
@@ -89,7 +89,7 @@
   </div>
 
   <div class="row" id="range-row" hidden>
-    <label>フレーム範囲
+    <label><span id="range-label">フレーム範囲</span>
       <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
       –
       <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
@@ -99,7 +99,7 @@
 
   <div class="panel">
     <div>
-      <p>Original (1st frame)</p>
+      <p id="orig-label">Original (1st frame)</p>
       <canvas id="orig" width="128" height="128"></canvas>
     </div>
     <div>
@@ -129,6 +129,84 @@
     const UPLOAD_BUF = 98368;
     const CHUNK_SIZE  = 200;                 // BLE write chunk
 
+    // ---- Localization (browser language: ja -> Japanese, else English) ----
+    const I18N = {
+      en: {
+        connectBtn: 'Connect', disconnectBtn: 'Disconnect',
+        connIdle: 'not connected', connOk: 'connected', connLost: 'disconnected', connError: 'error',
+        statusNames: ['idle', 'receiving', 'success', 'error'],
+        bgLabel: 'Background', bgTitle: 'Fill color for transparent areas and disposal clears',
+        sizeAuto: 'Auto size', size128: '128×128 (outer 4px hidden)',
+        colors16: '16 colors (4bit)', colors256: '256 colors (8bit)',
+        upload: 'Upload', revert: 'Revert to default',
+        rangeLabel: 'Frame range', totalFrames: n => `${n} frames total`,
+        origLabel: 'Original (1st frame)',
+        prevLabelInitial: 'Quantized (1st frame preview)',
+        prevLabel: (s, k) => `Quantized ${s}×${s}, ${k} colors (1st frame preview)`,
+        noBluetooth: 'Web Bluetooth is not available in this browser. Use Chrome, Edge or Brave over HTTPS or localhost (iOS browsers are unsupported).',
+        logConnecting: n => `connecting to ${n}`,
+        logConnected: 'connected', logDisconnected: 'disconnected',
+        logStatus: s => `status: ${s}`,
+        logConnectError: m => `connect error: ${m}`,
+        logLoading: (n, b) => `loading: ${n} (${b} bytes)`,
+        logGifInfo: (n, w, h) => `${n} frame(s), canvas ${w}x${h}`,
+        logStaticInfo: (w, h) => `static image ${w}x${h} (1 frame)`,
+        logBuilt: (b, n, s, p) => `payload built: ${b} bytes (${n} frames, ${s}x${s}, ${p}bpp)`,
+        logRebuilt: (b, n, s, p) => `payload rebuilt: ${b} bytes (${n} frames, ${s}x${s}, ${p}bpp)`,
+        logParseError: m => `parse error: ${m}`,
+        logRebuildError: m => `rebuild error: ${m}`,
+        logRange: (s, e, n) => `  frame range ${s}–${e} of ${n}`,
+        logFrameStats: (k, d, avg, full) =>
+          `  ${k} keyframe(s) + ${d} diff frame(s), ${avg} B/frame avg (full: ${full} B)`,
+        errTooBig: (t, buf, n, s, k) =>
+          `payload ${t} B > device buffer ${buf} B (${n} frames at ${s}x${s}/${k} colors) — narrow the frame range or reduce size/colors`,
+        logReset: 'reset...',
+        logUploaded: sec => `uploaded in ${sec}s, committing`,
+        logUploadError: m => `upload error: ${m}`,
+        logDisconnecting: 'disconnecting...',
+        logRevert: 'revert to default',
+        logRevertError: m => `revert error: ${m}`,
+      },
+      ja: {
+        connectBtn: '接続', disconnectBtn: '切断',
+        connIdle: '未接続', connOk: '接続中', connLost: '切断', connError: 'エラー',
+        statusNames: ['待機中', '受信中', '成功', 'エラー'],
+        bgLabel: '背景色', bgTitle: '透明部分とdisposalクリアの塗り色',
+        sizeAuto: 'サイズ自動', size128: '128×128 (端4pxは表示外)',
+        colors16: '16色 (4bit)', colors256: '256色 (8bit)',
+        upload: 'アップロード', revert: 'デフォルトに戻す',
+        rangeLabel: 'フレーム範囲', totalFrames: n => `全${n}フレーム`,
+        origLabel: '元画像 (先頭フレーム)',
+        prevLabelInitial: '量子化 (先頭フレームプレビュー)',
+        prevLabel: (s, k) => `量子化 ${s}×${s} ${k}色 (先頭フレームプレビュー)`,
+        noBluetooth: 'このブラウザでは Web Bluetooth が使えません。Chrome / Edge / Brave を HTTPS か localhost で開いてください (iOSの各ブラウザは非対応です)。',
+        logConnecting: n => `${n} に接続しています`,
+        logConnected: '接続しました', logDisconnected: '切断されました',
+        logStatus: s => `ステータス: ${s}`,
+        logConnectError: m => `接続エラー: ${m}`,
+        logLoading: (n, b) => `読み込み中: ${n} (${b} バイト)`,
+        logGifInfo: (n, w, h) => `${n}フレーム, キャンバス ${w}x${h}`,
+        logStaticInfo: (w, h) => `静止画 ${w}x${h} (1フレーム)`,
+        logBuilt: (b, n, s, p) => `ペイロード生成: ${b} バイト (${n}フレーム, ${s}x${s}, ${p}bpp)`,
+        logRebuilt: (b, n, s, p) => `ペイロード再生成: ${b} バイト (${n}フレーム, ${s}x${s}, ${p}bpp)`,
+        logParseError: m => `解析エラー: ${m}`,
+        logRebuildError: m => `再生成エラー: ${m}`,
+        logRange: (s, e, n) => `  フレーム範囲 ${s}–${e} / 全${n}`,
+        logFrameStats: (k, d, avg, full) =>
+          `  キーフレーム${k} + 差分${d}, 平均 ${avg} B/フレーム (フル: ${full} B)`,
+        errTooBig: (t, buf, n, s, k) =>
+          `ペイロード ${t} B がデバイスバッファ ${buf} B を超えています (${n}フレーム, ${s}x${s}/${k}色) — フレーム範囲を狭めるか、サイズ/色数を減らしてください`,
+        logReset: 'リセット...',
+        logUploaded: sec => `アップロード完了 (${sec}秒), コミットします`,
+        logUploadError: m => `アップロードエラー: ${m}`,
+        logDisconnecting: '切断しています...',
+        logRevert: 'デフォルトに戻します',
+        logRevertError: m => `リバートエラー: ${m}`,
+      },
+    };
+    const LANG = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
+    const T = I18N[LANG];
+
     // ---- DOM ----
     const $ = id => document.getElementById(id);
     const log = (...args) => {
@@ -146,9 +224,29 @@
       el.className = 'pill ' + cls;
     };
 
+    // Apply static labels for the selected language
+    document.documentElement.lang = LANG;
+    $('connect').textContent = T.connectBtn;
+    $('disconnect').textContent = T.disconnectBtn;
+    $('conn-status').textContent = T.connIdle;
+    $('upload-status').textContent = T.statusNames[0];
+    $('bg-label').textContent = T.bgLabel;
+    $('bg').title = T.bgTitle;
+    $('size').options[0].textContent = T.sizeAuto;
+    $('size').options[3].textContent = T.size128;
+    $('colors').options[0].textContent = T.colors16;
+    $('colors').options[1].textContent = T.colors256;
+    $('upload').textContent = T.upload;
+    $('revert').textContent = T.revert;
+    $('range-label').textContent = T.rangeLabel;
+    $('orig-label').textContent = T.origLabel;
+    $('prev-label').textContent = T.prevLabelInitial;
+
     if (!navigator.bluetooth) {
-      document.body.insertAdjacentHTML('afterbegin',
-        '<div class="warn">このブラウザでは Web Bluetooth が使えません。Chrome / Edge / Brave などをお試しください。HTTPS か localhost で開く必要があります。</div>');
+      const div = document.createElement('div');
+      div.className = 'warn';
+      div.textContent = T.noBluetooth;
+      document.body.prepend(div);
     }
 
     // ---- BLE state ----
@@ -163,13 +261,13 @@
           filters: [{ name: 'puchi-pix' }],
           optionalServices: [SERVICE]
         });
-        log('connecting to', device.name);
+        log(T.logConnecting(device.name));
         device.addEventListener('gattserverdisconnected', () => {
-          setConnStatus('切断');
+          setConnStatus(T.connLost);
           $('upload').disabled = true;
           $('revert').disabled = true;
           $('disconnect').disabled = true;
-          log('disconnected');
+          log(T.logDisconnected);
         });
         server = await device.gatt.connect();
         const service = await server.getPrimaryService(SERVICE);
@@ -179,19 +277,18 @@
         await statusChar.startNotifications();
         statusChar.addEventListener('characteristicvaluechanged', (e) => {
           const v = e.target.value.getUint8(0);
-          const names = ['idle', 'receiving', 'success', 'error'];
           const cls = v === 2 ? 'connected' : (v === 3 ? 'error' : '');
-          setUploadStatus(names[v] ?? `code ${v}`, cls);
-          log('status:', names[v] ?? v);
+          setUploadStatus(T.statusNames[v] ?? `code ${v}`, cls);
+          log(T.logStatus(T.statusNames[v] ?? v));
         });
-        setConnStatus('接続中', 'connected');
+        setConnStatus(T.connOk, 'connected');
         $('upload').disabled = (payload === null);
         $('revert').disabled = false;
         $('disconnect').disabled = false;
-        log('connected');
+        log(T.logConnected);
       } catch (e) {
-        log('connect error:', e.message);
-        setConnStatus('エラー', 'error');
+        log(T.logConnectError(e.message));
+        setConnStatus(T.connError, 'error');
       }
     });
 
@@ -200,7 +297,7 @@
       $('range-row').hidden = (n <= 1);
       $('f-start').max = n; $('f-start').value = 1;
       $('f-end').max = n;   $('f-end').value = n;
-      $('f-total').textContent = `全${n}フレーム`;
+      $('f-total').textContent = T.totalFrames(n);
     };
 
     // Read the selected range as [start, end] (1-based, inclusive), clamped
@@ -223,10 +320,10 @@
         lastComposed = await fileToComposed(lastFile);
         if (resetRange) resetFrameRange(lastComposed.composed.length);
         payload = buildPayload(lastComposed);
-        log(`payload built: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
+        log(T.logBuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
         if (server && server.connected) $('upload').disabled = false;
       } catch (err) {
-        log('parse error:', err.message);
+        log(T.logParseError(err.message));
         payload = null;
       }
     };
@@ -234,7 +331,7 @@
     $('file').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      log(`loading: ${file.name} (${file.size} bytes)`);
+      log(T.logLoading(file.name, file.size));
       lastFile = file;
       await recompose(true);
     });
@@ -245,9 +342,9 @@
       if (!lastComposed) return;
       try {
         payload = buildPayload(lastComposed);
-        log(`payload rebuilt: ${payload.length} bytes (${payload[3] | (payload[4] << 8)} frames, ${payload[5]}x${payload[5]}, ${payload[6]}bpp)`);
+        log(T.logRebuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
       } catch (err) {
-        log('rebuild error:', err.message);
+        log(T.logRebuildError(err.message));
         payload = null;
       }
     };
@@ -261,7 +358,7 @@
       if (!payload || !uploadChar || !commitChar) return;
       $('upload').disabled = true;
       try {
-        log('reset...');
+        log(T.logReset);
         await commitChar.writeValueWithResponse(new Uint8Array([0x02]));
         const t0 = performance.now();
         const total = payload.length;
@@ -273,10 +370,10 @@
           }
         }
         const t1 = performance.now();
-        log(`uploaded in ${((t1 - t0) / 1000).toFixed(2)}s, committing`);
+        log(T.logUploaded(((t1 - t0) / 1000).toFixed(2)));
         await commitChar.writeValueWithResponse(new Uint8Array([0x01]));
       } catch (e) {
-        log('upload error:', e.message);
+        log(T.logUploadError(e.message));
       } finally {
         $('upload').disabled = false;
       }
@@ -285,7 +382,7 @@
     // ---- Disconnect ----
     $('disconnect').addEventListener('click', () => {
       if (device && device.gatt.connected) {
-        log('disconnecting...');
+        log(T.logDisconnecting);
         device.gatt.disconnect();
       }
     });
@@ -293,11 +390,11 @@
     // ---- Revert ----
     $('revert').addEventListener('click', async () => {
       if (!commitChar) return;
-      log('revert to default');
+      log(T.logRevert);
       try {
         await commitChar.writeValueWithResponse(new Uint8Array([0x03]));
       } catch (e) {
-        log('revert error:', e.message);
+        log(T.logRevertError(e.message));
       }
     });
 
@@ -308,7 +405,7 @@
         const buf = await file.arrayBuffer();
         const parsed = parseGIF(buf);
         const frames = decompressFrames(parsed, true);
-        log(`${frames.length} frame(s), canvas ${parsed.lsd.width}x${parsed.lsd.height}`);
+        log(T.logGifInfo(frames.length, parsed.lsd.width, parsed.lsd.height));
         return composeGifFrames(parsed, frames);
       }
       // Static image (PNG, JPEG, WebP, ...) -> single frame, alpha flattened
@@ -320,7 +417,7 @@
       ctx.fillStyle = $('bg').value;
       ctx.fillRect(0, 0, bmp.width, bmp.height);
       ctx.drawImage(bmp, 0, 0);
-      log(`static image ${bmp.width}x${bmp.height} (1 frame)`);
+      log(T.logStaticInfo(bmp.width, bmp.height));
       return {
         composed: [{ delay: 1000, imageData: ctx.getImageData(0, 0, bmp.width, bmp.height) }],
         W: bmp.width, H: bmp.height
@@ -375,7 +472,7 @@
       const [fs, fe] = frameRange(allFrames.length);
       const composed = allFrames.slice(fs - 1, fe);
       if (composed.length < allFrames.length) {
-        log(`  frame range ${fs}–${fe} of ${allFrames.length}`);
+        log(T.logRange(fs, fe, allFrames.length));
       }
 
       // Show original (1st frame of the selected range, composited)
@@ -388,7 +485,7 @@
       const size = (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
       const K = parseInt($('colors').value, 10);      // 16 or 256
       const bpp = (K === 256) ? 8 : 4;
-      $('prev-label').textContent = `Quantized ${size}×${size} ${K}色 (1st frame preview)`;
+      $('prev-label').textContent = T.prevLabel(size, K);
 
       const resized = composed.map(c => resizeImageData(c.imageData, size, size));
 
@@ -426,8 +523,7 @@
         : 1 + r.rects.reduce((a, rc) => a + 4 + rc.data.length, 0));
       const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
       if (total > UPLOAD_BUF) {
-        throw new Error(`payload ${total} B > device buffer ${UPLOAD_BUF} B ` +
-          `(${N} frames at ${size}x${size}/${K}色) — フレーム範囲を狭めるか、サイズ/色数を減らしてください`);
+        throw new Error(T.errTooBig(total, UPLOAD_BUF, N, size, K));
       }
 
       const out = new Uint8Array(total);
@@ -463,8 +559,7 @@
           }
         }
       }
-      log(`  ${keyframes} keyframe(s) + ${N - keyframes} diff frame(s), ` +
-        `${(total / N).toFixed(0)} B/frame avg (full: ${frameBytes + 3} B)`);
+      log(T.logFrameStats(keyframes, N - keyframes, (total / N).toFixed(0), frameBytes + 3));
       return out;
     }
 
