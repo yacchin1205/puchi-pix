@@ -14,21 +14,26 @@
 //   Upload: chunked writes appended in order to a 32 KB buffer.
 //   Commit: 0x01 = validate & swap, 0x02 = buffer reset, 0x03 = revert default.
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
-//   Motion: 10 bytes [enabled, mainStart lo/hi, exitStart lo/hi, speed,
-//                     gap lo/hi, bg565 lo/hi].
-//     Splits the uploaded animation into an entry walk segment [0, mainStart),
-//     a main segment and an optional exit walk segment: exitStart = 0 reuses
-//     the entry segment for the exit (main = [mainStart, N)), otherwise
-//     main = [mainStart, exitStart) and exit = [exitStart, N). mainStart = 0
-//     means no entry segment: the main segment itself plays while walking
-//     in (and out, when it has no exit fallback either). When enabled,
-//     the sprite walks in from the right (walk segment looping, translating
-//     at `speed` source px/s), plays the main segment at center — looping
-//     while device handling is detected via the accelerometer — then exits
-//     left and the screen stays empty for `gap` ms before the next entry.
-//     bg565 fills everything outside the sprite (RGB565), matching the
-//     uploader's compositing background. Cleared by image commit / revert;
-//     the uploader re-sends it after each upload. Persisted to /motion.bin.
+//   Motion: 14 bytes [enabled, mainStart lo/hi, loopStart lo/hi,
+//                     outStart lo/hi, exitStart lo/hi, speed, gap lo/hi,
+//                     bg565 lo/hi].
+//     Splits the uploaded animation into up to five segments:
+//       entry walk  [0, mainStart)         loops while walking in
+//       intro trans [mainStart, loopStart) plays once after arriving
+//       main loop   [loopStart, outStart | exitStart | N)
+//                                          loops while handling is detected
+//       outro trans [outStart, exitStart | N) plays once before leaving
+//       exit walk   [exitStart, N)         loops while walking out
+//     Sentinels: mainStart = 0 -> no entry walk (the main loop itself plays
+//     while walking in/out; intro is forced off). loopStart <= mainStart ->
+//     no intro. outStart = 0 -> no outro. exitStart = 0 -> exit reuses the
+//     entry walk frames (or the main loop when there is no entry).
+//     When enabled, the sprite walks in from the right translating at
+//     `speed` source px/s, then the screen stays empty for `gap` ms after
+//     the exit before the next entry. bg565 fills everything outside the
+//     sprite (RGB565), matching the uploader's compositing background.
+//     Cleared by image commit / revert; the uploader re-sends it after each
+//     upload. Persisted to /motion.bin.
 //
 // Payload (sent via Upload, raw bytes appended in order):
 //   v1 (64x64 fixed):
@@ -344,16 +349,18 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
 // changes (frame indices are payload-specific).
 struct MotionConfig {
   uint8_t  enabled;    // 0 = plain in-place loop (legacy behavior)
-  uint16_t mainStart;  // first frame of the main segment; entry walk = [0, mainStart)
-  uint16_t exitStart;  // first frame of the exit walk segment; 0 = reuse entry
+  uint16_t mainStart;  // end of entry walk = start of intro; 0 = no entry
+  uint16_t loopStart;  // first frame of the main loop; <= mainStart = no intro
+  uint16_t outStart;   // first frame of the outro transition; 0 = none
+  uint16_t exitStart;  // first frame of the exit walk; 0 = reuse entry
   uint8_t  speed;      // traverse speed, source px/s
   uint16_t gapMs;      // empty-screen time after exit before re-entry
   uint16_t bg;         // RGB565 fill outside the sprite / for empty screen
 };
-static MotionConfig motionCfg = { 0, 1, 0, 60, 1000, 0x0000 };
+static MotionConfig motionCfg = { 0, 1, 0, 0, 0, 60, 1000, 0x0000 };
 
 #define MOTION_PATH "/motion.bin"
-static constexpr size_t MOTION_CFG_LEN = 10;
+static constexpr size_t MOTION_CFG_LEN = 14;
 
 static volatile uint8_t motionCfgPending[MOTION_CFG_LEN];
 static volatile bool motionCfgWritten = false;
@@ -963,7 +970,9 @@ static constexpr int32_t HANDLE_THRESH = 600;
 static constexpr uint32_t HANDLE_HOLD_MS = 2000;
 static uint32_t lastHandledMs = 0;
 
-enum MotionPhase : uint8_t { PH_GAP, PH_ENTER, PH_MAIN, PH_EXIT };
+enum MotionPhase : uint8_t {
+  PH_GAP, PH_ENTER, PH_TRANS_IN, PH_MAIN, PH_TRANS_OUT, PH_EXIT
+};
 static MotionPhase motionPhase = PH_GAP;
 static int32_t motionPosMpx = 0;    // sprite offset, milli-source-px, + = right
 static uint32_t motionLastMs = 0;   // last position integration time
@@ -981,42 +990,57 @@ static inline int16_t motionMaxShift() {
 }
 
 // Segment boundaries derived from the config (all inclusive last indices).
-// exitStart = 0 means the exit reuses the entry walk segment; mainStart = 0
-// means there is no entry segment and the walk phases fall back to playing
-// the main segment while translating.
+// See the header comment for the five-segment layout and its sentinels.
 static inline bool hasEntrySeg() { return motionCfg.mainStart > 0; }
-static inline uint16_t mainLastFrame() {
+static inline uint16_t loopFirstFrame() {
+  return (motionCfg.loopStart > motionCfg.mainStart) ? motionCfg.loopStart
+                                                     : motionCfg.mainStart;
+}
+static inline bool hasIntroSeg() { return loopFirstFrame() > motionCfg.mainStart; }
+static inline uint16_t loopLastFrame() {
+  if (motionCfg.outStart) return motionCfg.outStart - 1;
+  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
+                             : (uploadedFrameCount - 1);
+}
+static inline uint16_t outLastFrame() {
   return motionCfg.exitStart ? (motionCfg.exitStart - 1)
                              : (uploadedFrameCount - 1);
 }
 static inline uint16_t enterLastFrame() {
-  return hasEntrySeg() ? (motionCfg.mainStart - 1) : mainLastFrame();
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : loopLastFrame();
 }
 static inline uint16_t exitFirstFrame() {
   return motionCfg.exitStart ? motionCfg.exitStart : 0;
 }
 static inline uint16_t exitLastFrame() {
   if (motionCfg.exitStart) return uploadedFrameCount - 1;
-  return hasEntrySeg() ? (motionCfg.mainStart - 1) : mainLastFrame();
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : loopLastFrame();
 }
 
-// Validate and adopt a 10-byte motion config, then restart the presentation.
+// Validate and adopt a 14-byte motion config, then restart the presentation.
+// Out-of-range optional segments collapse to "absent" rather than rejecting
+// the whole config.
 static void applyMotionCfg(const uint8_t* p) {
   MotionConfig c;
   c.enabled   = p[0] ? 1 : 0;
   c.mainStart = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
-  c.exitStart = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
-  c.speed     = p[5] ? p[5] : 60;
-  c.gapMs     = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
-  c.bg        = (uint16_t)p[8] | ((uint16_t)p[9] << 8);
-  if (c.enabled &&
-      (!uploadedActive || c.mainStart >= uploadedFrameCount)) {
-    c.enabled = 0;
-  }
-  // An unusable exit segment falls back to reusing the entry walk frames.
-  if (c.exitStart &&
-      (c.exitStart <= c.mainStart || c.exitStart >= uploadedFrameCount)) {
+  c.loopStart = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
+  c.outStart  = (uint16_t)p[5] | ((uint16_t)p[6] << 8);
+  c.exitStart = (uint16_t)p[7] | ((uint16_t)p[8] << 8);
+  c.speed     = p[9] ? p[9] : 60;
+  c.gapMs     = (uint16_t)p[10] | ((uint16_t)p[11] << 8);
+  c.bg        = (uint16_t)p[12] | ((uint16_t)p[13] << 8);
+  const uint16_t n = uploadedFrameCount;
+  if (c.enabled && (!uploadedActive || c.mainStart >= n)) c.enabled = 0;
+  if (c.mainStart == 0) c.loopStart = 0;              // intro needs an entry
+  if (c.loopStart <= c.mainStart || c.loopStart >= n) c.loopStart = c.mainStart;
+  if (c.exitStart && (c.exitStart <= c.loopStart || c.exitStart >= n)) {
     c.exitStart = 0;
+  }
+  if (c.outStart &&
+      (c.outStart <= c.loopStart ||
+       c.outStart >= (c.exitStart ? c.exitStart : n))) {
+    c.outStart = 0;
   }
   motionCfg = c;
   applyActiveSource();
@@ -1044,6 +1068,8 @@ static bool persistMotionCfg() {
   uint8_t b[MOTION_CFG_LEN] = {
     motionCfg.enabled,
     (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
+    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
     (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
     motionCfg.speed,
     (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
@@ -1069,6 +1095,17 @@ static void loadMotionCfg() {
   bool ok = (f.read(b, MOTION_CFG_LEN) == MOTION_CFG_LEN);
   f.close();
   if (ok) applyMotionCfg(b);
+}
+
+// Begin the walk-out. When the exit reuses frames that are not currently
+// playing, the chain is replayed to the segment start; without entry and
+// exit segments the main loop simply keeps playing while translating.
+static void startExit() {
+  motionPhase = PH_EXIT;
+  motionPosMpx = 0;
+  if (motionCfg.exitStart || hasEntrySeg()) {
+    animJumpTo(exitFirstFrame());
+  }
 }
 
 // Per-loop motion driver: advances phase/position/frames and redraws when
@@ -1100,13 +1137,20 @@ static void runMotion(uint32_t now, bool binChanged) {
         redraw = true;
       }
       if (motionPhase == PH_ENTER && motionPosMpx <= 0) {
-        motionPhase = PH_MAIN;
         motionPosMpx = 0;
         // Without an entry segment the main loop is already playing, so its
         // frame position is kept instead of snapping back to the start.
         if (hasEntrySeg()) {
-          animJumpTo(motionCfg.mainStart);
+          if (hasIntroSeg()) {
+            motionPhase = PH_TRANS_IN;
+            animJumpTo(motionCfg.mainStart);
+          } else {
+            motionPhase = PH_MAIN;
+            animJumpTo(loopFirstFrame());
+          }
           lastFrameTime = now;
+        } else {
+          motionPhase = PH_MAIN;
         }
         redraw = true;
       } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
@@ -1117,20 +1161,39 @@ static void runMotion(uint32_t now, bool binChanged) {
       }
       break;
 
+    case PH_TRANS_IN:   // one-shot [mainStart, loopStart); ends inside the loop
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        animAdvanceRange(motionCfg.mainStart, loopLastFrame());
+        if (curFrame >= loopFirstFrame()) motionPhase = PH_MAIN;
+        redraw = true;
+      }
+      break;
+
     case PH_MAIN:
       if (now - lastFrameTime >= getDuration(curFrame)) {
         lastFrameTime = now;
-        if (curFrame >= mainLastFrame()) {
+        if (curFrame >= loopLastFrame()) {
           if (handledRecently(now)) {
-            animJumpTo(motionCfg.mainStart);   // keep looping while handled
+            animJumpTo(loopFirstFrame());      // keep looping while handled
+          } else if (motionCfg.outStart) {
+            motionPhase = PH_TRANS_OUT;
+            animAdvanceRange(motionCfg.outStart, outLastFrame());
           } else {
-            motionPhase = PH_EXIT;
-            motionPosMpx = 0;
-            animJumpTo(exitFirstFrame());
+            startExit();
           }
         } else {
-          animAdvanceRange(motionCfg.mainStart, mainLastFrame());
+          animAdvanceRange(loopFirstFrame(), loopLastFrame());
         }
+        redraw = true;
+      }
+      break;
+
+    case PH_TRANS_OUT:  // one-shot [outStart, exitStart | N)
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (curFrame >= outLastFrame()) startExit();
+        else animAdvanceRange(motionCfg.outStart, outLastFrame());
         redraw = true;
       }
       break;
@@ -1173,6 +1236,8 @@ static void publishMotionCfg() {
   uint8_t b[MOTION_CFG_LEN] = {
     motionCfg.enabled,
     (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
+    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
     (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
     motionCfg.speed,
     (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
@@ -1565,7 +1630,7 @@ void loop() {
   // uploader re-sends it after a commit if the user wants motion.
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
-    motionCfg = MotionConfig{ 0, 1, 0, 60, 1000, 0x0000 };
+    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 60, 1000, 0x0000 };
     motionClearPending = true;
     publishMotionCfg();
     applyActiveSource();
