@@ -60,9 +60,17 @@
 //                       { rx, ry, rw, rh (uint8) + data[ceil(rw*rh*bpp/8)] }
 //             Diffs apply onto the previously composed frame; frame 0 must be
 //             a keyframe. Playback is sequential and wraps to frame 0.
+//   v4 (RLE diff chain): identical to v3 except every pixel-data block is
+//     PackBits RLE compressed and prefixed with its uint16 LE byte length:
+//     keyframe: uint16 rleLen + rle[rleLen]   (decodes to W*H*bpp/8 bytes)
+//     rect:     rx, ry, rw, rh, uint16 rleLen + rle[rleLen]
+//               (decodes to ceil(rw*rh*bpp/8) bytes)
+//     PackBits: control c < 128 = copy next c+1 bytes verbatim; c > 128 =
+//     repeat next byte (257 - c) times; c == 128 = no-op. 4bpp data is RLE'd
+//     on the packed bytes.
 //   v1/v2 frame count is additionally bounded by the upload buffer (98368 B):
 //   64x64 -> 16 frames either depth; 128x128 -> 12 (16-color) / 5 (256-color).
-//   v3 has no fixed frame cap; the payload just has to fit the buffer.
+//   v3/v4 have no fixed frame cap; the payload just has to fit the buffer.
 //
 // BLE is active only while awake. Deep-sleep entry stops the radio implicitly.
 //
@@ -103,6 +111,16 @@ enum LoadResult : uint8_t {
   LOAD_NONE     = 1,  // no persisted image (first boot / after revert)
   LOAD_FS_FAIL  = 2,  // filesystem mount or read failure
   LOAD_INVALID  = 3,  // file exists but is corrupt / wrong format
+};
+
+// PackBits reader emitting one decoded byte per call (v4 payloads). The
+// stream is validated up front, so no bounds checks during decode. Declared
+// up here for the same auto-prototype reason as LoadResult.
+struct RleReader {
+  const uint8_t* p;
+  uint8_t runByte;
+  uint8_t runLeft;
+  uint8_t litLeft;
 };
 
 // ---- Pin assignments ----
@@ -395,66 +413,149 @@ static void composeFrame(uint16_t frameIdx, uint16_t* buf) {
   else                composeFrameFromProgmem((uint8_t)frameIdx, buf);
 }
 
-// ---- v3 (diff chain) record helpers ----
+// ---- v3/v4 (diff chain) record helpers ----
 // Record offsets passed here are trusted: validateUpload() walks the full
-// record chain on commit and rejects any out-of-bounds rect or truncation.
+// record chain on commit and rejects any out-of-bounds rect, bad RLE stream
+// or truncation.
 
-static inline uint32_t v3FrameBytes() {
+static inline uint32_t chainFrameBytes() {
   return (uint32_t)upSize * upSize * upBpp / 8;
 }
 
-static inline uint32_t v3RectDataBytes(uint8_t rw, uint8_t rh) {
+static inline uint32_t chainRectDataBytes(uint8_t rw, uint8_t rh) {
   uint32_t px = (uint32_t)rw * rh;
   return (upBpp == 8) ? px : ((px + 1) >> 1);
 }
 
-static uint32_t v3NextRecord(uint32_t off) {
-  if (uploadBuf[off + 2] & 0x01) return off + 3 + v3FrameBytes();
-  uint8_t rectCount = uploadBuf[off + 3];
-  uint32_t p = off + 4;
-  for (uint8_t r = 0; r < rectCount; r++)
-    p += 4 + v3RectDataBytes(uploadBuf[p + 2], uploadBuf[p + 3]);
-  return p;
-}
-
-static uint16_t v3Duration(uint32_t off) {
+static inline uint16_t rdU16(uint32_t off) {
   return (uint16_t)uploadBuf[off] | ((uint16_t)uploadBuf[off + 1] << 8);
 }
 
+static inline void rleInit(RleReader& r, const uint8_t* p) {
+  r.p = p;
+  r.runLeft = 0;
+  r.litLeft = 0;
+}
+
+static uint8_t rleNextByte(RleReader& r) {
+  if (r.runLeft) { r.runLeft--; return r.runByte; }
+  if (r.litLeft) { r.litLeft--; return *r.p++; }
+  for (;;) {
+    uint8_t c = *r.p++;
+    if (c < 128) { r.litLeft = c; return *r.p++; }
+    if (c > 128) {
+      r.runByte = *r.p++;
+      r.runLeft = (uint8_t)(256 - c);   // total 257-c, one emitted now
+      return r.runByte;
+    }
+    // c == 128: no-op
+  }
+}
+
+// Verify a PackBits stream of `len` bytes decodes to exactly `expect` bytes.
+static bool rleCheck(const uint8_t* p, uint32_t len, uint32_t expect) {
+  const uint8_t* end = p + len;
+  uint32_t out = 0;
+  while (p < end) {
+    uint8_t c = *p++;
+    if (c < 128) {
+      uint32_t n = (uint32_t)c + 1;
+      if (p + n > end) return false;
+      p += n;
+      out += n;
+    } else if (c > 128) {
+      if (p >= end) return false;
+      p++;
+      out += 257 - c;
+    }
+  }
+  return out == expect;
+}
+
+static uint32_t chainNextRecord(uint32_t off) {
+  if (upVer >= 4) {
+    if (uploadBuf[off + 2] & 0x01) return off + 5 + rdU16(off + 3);
+    uint8_t rectCount = uploadBuf[off + 3];
+    uint32_t p = off + 4;
+    for (uint8_t r = 0; r < rectCount; r++)
+      p += 6 + rdU16(p + 4);
+    return p;
+  }
+  if (uploadBuf[off + 2] & 0x01) return off + 3 + chainFrameBytes();
+  uint8_t rectCount = uploadBuf[off + 3];
+  uint32_t p = off + 4;
+  for (uint8_t r = 0; r < rectCount; r++)
+    p += 4 + chainRectDataBytes(uploadBuf[p + 2], uploadBuf[p + 3]);
+  return p;
+}
+
+static uint16_t chainDuration(uint32_t off) {
+  return rdU16(off);
+}
+
 // Keyframe: full decode into buf. Diff: rect patches applied over buf, which
-// must still hold the previously composed frame.
-static void v3Decode(uint32_t off, uint16_t* buf) {
+// must still hold the previously composed frame. v4 reads pixel data through
+// the RLE reader; v3 reads it raw.
+static void chainDecode(uint32_t off, uint16_t* buf) {
   const uint16_t* pal = uploadedPalette();
+  const bool rle = (upVer >= 4);
   if (uploadBuf[off + 2] & 0x01) {
-    const uint8_t* data = &uploadBuf[off + 3];
     uint32_t n = (uint32_t)upSize * upSize;
-    if (upBpp == 8) {
-      for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+    if (rle) {
+      RleReader r;
+      rleInit(r, &uploadBuf[off + 5]);
+      uint8_t b = 0;
+      for (uint32_t i = 0; i < n; i++) {
+        if (upBpp == 8) buf[i] = pal[rleNextByte(r)];
+        else {
+          if (!(i & 1)) b = rleNextByte(r);
+          buf[i] = pal[(i & 1) ? (b & 0x0F) : (b >> 4)];
+        }
+      }
     } else {
-      for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
+      const uint8_t* data = &uploadBuf[off + 3];
+      if (upBpp == 8) {
+        for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+      } else {
+        for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
+      }
     }
     return;
   }
   uint8_t rectCount = uploadBuf[off + 3];
   uint32_t p = off + 4;
-  for (uint8_t r = 0; r < rectCount; r++) {
+  for (uint8_t rc = 0; rc < rectCount; rc++) {
     uint8_t rx = uploadBuf[p], ry = uploadBuf[p + 1];
     uint8_t rw = uploadBuf[p + 2], rh = uploadBuf[p + 3];
-    const uint8_t* data = &uploadBuf[p + 4];
+    const uint8_t* data = &uploadBuf[p + (rle ? 6 : 4)];
+    RleReader r;
+    if (rle) rleInit(r, data);
     uint32_t i = 0;
+    uint8_t b = 0;
     for (uint8_t dy = 0; dy < rh; dy++) {
       uint16_t* row = &buf[(uint32_t)(ry + dy) * upSize + rx];
-      for (uint8_t dx = 0; dx < rw; dx++, i++)
-        row[dx] = pal[(upBpp == 8) ? data[i] : read4bitRam(data, i)];
+      for (uint8_t dx = 0; dx < rw; dx++, i++) {
+        uint8_t v;
+        if (rle) {
+          if (upBpp == 8) v = rleNextByte(r);
+          else {
+            if (!(i & 1)) b = rleNextByte(r);
+            v = (i & 1) ? (b & 0x0F) : (b >> 4);
+          }
+        } else {
+          v = (upBpp == 8) ? data[i] : read4bitRam(data, i);
+        }
+        row[dx] = pal[v];
+      }
     }
-    p += 4 + v3RectDataBytes(rw, rh);
+    p += rle ? (6 + rdU16(p + 4)) : (4 + chainRectDataBytes(rw, rh));
   }
 }
 
 // Frame metadata accessors (dispatch source).
 static uint16_t getDuration(uint16_t idx) {
   if (uploadedActive) {
-    if (upVer == 3) return v3Duration(upCurRec);
+    if (upVer >= 3) return chainDuration(upCurRec);
     if (idx >= uploadedFrameCount) idx = 0;
     return uploadedFrameDuration(idx);
   }
@@ -783,9 +884,9 @@ static uint32_t lastLpUpdateMs = 0;
 // Reset playback to frame 0 and compose it into frameBuf.
 static void animReset() {
   curFrame = 0;
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     upCurRec = upDataOff;
-    v3Decode(upCurRec, frameBuf);
+    chainDecode(upCurRec, frameBuf);
   } else {
     composeFrame(0, frameBuf);
   }
@@ -794,15 +895,15 @@ static void animReset() {
 // Advance to the next frame. frameBuf always holds the current composed
 // frame, so v3 only patches the diff rects; other sources recompose fully.
 static void animAdvance() {
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     if ((uint16_t)(curFrame + 1) < uploadedFrameCount) {
       curFrame++;
-      upCurRec = v3NextRecord(upCurRec);
+      upCurRec = chainNextRecord(upCurRec);
     } else {
       curFrame = 0;
       upCurRec = upDataOff;
     }
-    v3Decode(upCurRec, frameBuf);
+    chainDecode(upCurRec, frameBuf);
   } else {
     curFrame = getNextFrame(curFrame);
     composeFrame(curFrame, frameBuf);
@@ -815,19 +916,19 @@ static void animAdvance() {
 // a segment jump costs a few small decodes at most.
 static void animJumpTo(uint16_t target) {
   if (target >= uploadedFrameCount) target = 0;
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     uint32_t off = upDataOff;
     uint32_t keyOff = upDataOff;
     uint16_t keyIdx = 0;
     for (uint16_t i = 1; i <= target; i++) {
-      off = v3NextRecord(off);
+      off = chainNextRecord(off);
       if (uploadBuf[off + 2] & 0x01) { keyOff = off; keyIdx = i; }
     }
     upCurRec = keyOff;
-    v3Decode(upCurRec, frameBuf);
+    chainDecode(upCurRec, frameBuf);
     for (uint16_t i = keyIdx; i < target; i++) {
-      upCurRec = v3NextRecord(upCurRec);
-      v3Decode(upCurRec, frameBuf);
+      upCurRec = chainNextRecord(upCurRec);
+      chainDecode(upCurRec, frameBuf);
     }
   } else {
     composeFrame(target, frameBuf);
@@ -841,10 +942,10 @@ static void animAdvanceRange(uint16_t first, uint16_t last) {
     animJumpTo(first);
     return;
   }
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     curFrame++;
-    upCurRec = v3NextRecord(upCurRec);
-    v3Decode(upCurRec, frameBuf);
+    upCurRec = chainNextRecord(upCurRec);
+    chainDecode(upCurRec, frameBuf);
   } else {
     curFrame++;
     composeFrame(curFrame, frameBuf);
@@ -1100,7 +1201,7 @@ static bool validateUpload() {
     if (bpp == 0) bpp = 4;
     if (bpp != 4 && bpp != 8) return false;
     palOff = 8;
-  } else if (ver == 3) {    // diff chain: keyframes + rect patches
+  } else if (ver == 3 || ver == 4) {  // diff chain (v4: RLE pixel data)
     if (uploadPos < 8) return false;
     n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
     if (n == 0) return false;
@@ -1116,27 +1217,45 @@ static bool validateUpload() {
   uint32_t palBytes = (bpp == 8) ? 512 : 32;
   uint32_t dataOff = palOff + palBytes;
 
-  if (ver == 3) {
-    // Walk every record; playback trusts these offsets and rect bounds.
+  if (ver >= 3) {
+    // Walk every record; playback trusts these offsets, rect bounds and
+    // (v4) RLE stream integrity.
     uint32_t frameBytes = (uint32_t)size * size * bpp / 8;
     uint32_t off = dataOff;
     for (uint16_t i = 0; i < n; i++) {
       if (off + 3 > uploadPos) return false;
       if (uploadBuf[off + 2] & 0x01) {
-        off += 3 + frameBytes;
+        if (ver >= 4) {
+          if (off + 5 > uploadPos) return false;
+          uint32_t rl = (uint32_t)uploadBuf[off + 3] | ((uint32_t)uploadBuf[off + 4] << 8);
+          if (off + 5 + rl > uploadPos) return false;
+          if (!rleCheck(&uploadBuf[off + 5], rl, frameBytes)) return false;
+          off += 5 + rl;
+        } else {
+          off += 3 + frameBytes;
+        }
       } else {
         if (i == 0) return false;  // frame 0 must be a keyframe
         if (off + 4 > uploadPos) return false;
         uint8_t rectCount = uploadBuf[off + 3];
         off += 4;
         for (uint8_t r = 0; r < rectCount; r++) {
-          if (off + 4 > uploadPos) return false;
+          uint32_t rectHdr = (ver >= 4) ? 6 : 4;
+          if (off + rectHdr > uploadPos) return false;
           uint8_t rw = uploadBuf[off + 2], rh = uploadBuf[off + 3];
           if (rw == 0 || rh == 0) return false;
           if ((uint16_t)uploadBuf[off] + rw > size) return false;
           if ((uint16_t)uploadBuf[off + 1] + rh > size) return false;
           uint32_t px = (uint32_t)rw * rh;
-          off += 4 + ((bpp == 8) ? px : ((px + 1) >> 1));
+          uint32_t raw = (bpp == 8) ? px : ((px + 1) >> 1);
+          if (ver >= 4) {
+            uint32_t rl = (uint32_t)uploadBuf[off + 4] | ((uint32_t)uploadBuf[off + 5] << 8);
+            if (off + 6 + rl > uploadPos) return false;
+            if (!rleCheck(&uploadBuf[off + 6], rl, raw)) return false;
+            off += 6 + rl;
+          } else {
+            off += 4 + raw;
+          }
         }
       }
       if (off > uploadPos) return false;
