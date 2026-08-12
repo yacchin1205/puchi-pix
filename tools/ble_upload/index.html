@@ -64,7 +64,7 @@
     #strip { display: flex; gap: 4px; }
     /* Cell geometry: canvas 40px + 1px border each side = 42px box, plus the
        4px flex gap -> 46px pitch. The segment bar math (CELL) relies on it. */
-    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; }
+    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; cursor: pointer; }
     .thumb canvas {
       display: block;
       width: 40px; height: 40px;
@@ -90,6 +90,7 @@
     .band.trim { background: #ddd; }
     .band.entry { background: #4a90d9; }
     .band.tin, .band.tout { background: #8f77c9; }
+    .band.shake { background: #d9534f; }
     .band.main { background: #3cb371; }
     .band.exit { background: #e8963c; }
     .handle {
@@ -180,6 +181,7 @@
     <div class="row" style="gap: 6px; margin-bottom: 0.4em">
       <label><input type="checkbox" id="e-on" checked> <span id="e-on-label">入場</span></label>
       <label><input type="checkbox" id="ti-on"> <span id="ti-on-label">中割(前)</span></label>
+      <label><input type="checkbox" id="sh-on"> <span id="sh-on-label">シェイク</span></label>
       <label><input type="checkbox" id="to-on"> <span id="to-on-label">中割(後)</span></label>
       <label><input type="checkbox" id="x-on"> <span id="x-on-label">退場</span></label>
       <button id="strip-reset">初期状態に戻す</button>
@@ -202,19 +204,25 @@
     const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
     const MOTION  = '5550eec9-b00f-4444-9876-ab12cd34ef05';
+    const PROTO   = '5550eec9-b00f-4444-9876-ab12cd34ef06';
 
     // ---- Image format constants (must match firmware) ----
-    // Payload v4: 8B header (magic, version=4, N uint16 LE, size, bpp, reserved)
+    // Payload v5: 8B header (magic, version=5, N uint16 LE, size, bpp, reserved)
     // + palette (16 or 256 x uint16 RGB565) + per-frame records:
-    //   uint16 duration_ms + uint8 flags (bit0 = keyframe)
+    //   uint16 duration_ms + uint8 flags (bit0 = keyframe, bit1 = ref diff)
     //   keyframe: uint16 rleLen + PackBits RLE of pixels[W*H*bpp/8]
     //   diff:     uint8 rectCount + rects { x, y, w, h, uint16 rleLen +
     //             PackBits RLE of the rect's packed pixels vs prev frame }
+    //   ref diff: uint16 refFrame + uint8 rectCount + rects (vs refFrame;
+    //             zero rects = exact repeat). refFrame must be composable
+    //             without touching any ref-diff record (firmware rule).
     // PackBits: control c < 128 = copy next c+1 bytes; c > 128 = repeat next
     // byte 257-c times. 4bpp data is RLE'd on the packed bytes.
     // No fixed frame cap; the whole payload must fit the firmware buffer.
     const UPLOAD_BUF = 98368;
     const CHUNK_SIZE  = 200;                 // BLE write chunk
+    const PAYLOAD_VERSION = 5;               // version this tool emits
+    const MOTION_CFG_BYTES = 16;             // motion config wire length
 
     // ---- Localization (browser language: ja -> Japanese, else English) ----
     const I18N = {
@@ -245,6 +253,8 @@
         logRange: (s, e, n) => `  frame range ${s}–${e} of ${n}`,
         logFrameStats: (k, d, avg, full) =>
           `  ${k} keyframe(s) + ${d} diff frame(s), ${avg} B/frame avg (full: ${full} B)`,
+        logDecodeCost: (adv, jump, full) =>
+          `  decode cost: max advance ${adv} px / max jump ${jump} px (full frame ${full} px)`,
         errTooBig: (t, buf, n, s, k) =>
           `payload ${t} B > device buffer ${buf} B (${n} frames at ${s}x${s}/${k} colors) — narrow the frame range or reduce size/colors`,
         logReset: 'reset...',
@@ -260,10 +270,17 @@
         pvLabel: 'Preview', pvPlay: 'Play', pvStop: 'Stop',
         eOnLabel: 'Entry', xOnLabel: 'Exit',
         tiOnLabel: 'Intro', toOnLabel: 'Outro',
+        shOnLabel: 'Shake', segShake: 'Shake',
         segTIn: 'Intro', segTOut: 'Outro',
         segEntry: 'Entry', segMain: 'Main', segExit: 'Exit',
         logMotionSent: (on, s) => on ? `motion config sent (main starts at frame ${s})` : 'motion config sent (disabled)',
         logMotionError: m => `motion config error: ${m}`,
+        logSegNoRoom: name => `${name}: no room to add this segment`,
+        logProtoMissing: 'Firmware is too old for this tool (no protocol info); update the firmware. Upload disabled.',
+        logProtoMismatch: (dmax, dmin, dlen) =>
+          `Protocol mismatch: firmware supports payload v${dmin}-v${dmax} / motion ${dlen} B, ` +
+          `this tool emits payload v${PAYLOAD_VERSION} / motion ${MOTION_CFG_BYTES} B. ` +
+          'Update the firmware (or use a matching tool). Upload disabled.',
       },
       ja: {
         connectBtn: '接続', disconnectBtn: '切断',
@@ -292,6 +309,8 @@
         logRange: (s, e, n) => `  フレーム範囲 ${s}–${e} / 全${n}`,
         logFrameStats: (k, d, avg, full) =>
           `  キーフレーム${k} + 差分${d}, 平均 ${avg} B/フレーム (フル: ${full} B)`,
+        logDecodeCost: (adv, jump, full) =>
+          `  再生コスト: 順送り最大 ${adv} px / ジャンプ最大 ${jump} px (フル ${full} px)`,
         errTooBig: (t, buf, n, s, k) =>
           `ペイロード ${t} B がデバイスバッファ ${buf} B を超えています (${n}フレーム, ${s}x${s}/${k}色) — フレーム範囲を狭めるか、サイズ/色数を減らしてください`,
         logReset: 'リセット...',
@@ -307,10 +326,17 @@
         pvLabel: 'プレビュー', pvPlay: '再生', pvStop: '停止',
         eOnLabel: '入場', xOnLabel: '退場',
         tiOnLabel: '中割(前)', toOnLabel: '中割(後)',
+        shOnLabel: 'シェイク', segShake: 'シェイク',
         segTIn: '中割', segTOut: '中割',
         segEntry: '入場', segMain: 'メイン', segExit: '退場',
         logMotionSent: (on, s) => on ? `移動設定を送信しました (メイン開始: フレーム${s})` : '移動設定を送信しました (無効)',
         logMotionError: m => `移動設定エラー: ${m}`,
+        logSegNoRoom: name => `${name}: 空きがないため追加できません`,
+        logProtoMissing: 'ファームウェアが古く、このツールと互換性がありません(プロトコル情報なし)。ファームウェアを更新してください。アップロードは無効です。',
+        logProtoMismatch: (dmax, dmin, dlen) =>
+          `プロトコル不一致: ファーム側はペイロード v${dmin}〜v${dmax} / 移動設定 ${dlen} B、` +
+          `このツールはペイロード v${PAYLOAD_VERSION} / 移動設定 ${MOTION_CFG_BYTES} B です。` +
+          'ファームウェアを更新してください。アップロードは無効です。',
       },
     };
     const LANG = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
@@ -358,6 +384,7 @@
     $('strip-reset').textContent = T.stripReset;
     $('e-on-label').textContent = T.eOnLabel;
     $('ti-on-label').textContent = T.tiOnLabel;
+    $('sh-on-label').textContent = T.shOnLabel;
     $('to-on-label').textContent = T.toOnLabel;
     $('x-on-label').textContent = T.xOnLabel;
 
@@ -370,6 +397,7 @@
 
     // ---- BLE state ----
     let device, server, uploadChar, commitChar, statusChar, motionChar;
+    let compatible = false;   // set per connection after the protocol check
     let payload = null;
     let lastComposed = null;  // {composed: [{delay, imageData}], W, H} — for rebuild on size change
 
@@ -393,19 +421,36 @@
         uploadChar = await service.getCharacteristic(UPLOAD);
         commitChar = await service.getCharacteristic(COMMIT);
         statusChar = await service.getCharacteristic(STATUS);
+        // Explicit protocol check: a missing Proto characteristic or a
+        // version/length mismatch is reported and blocks uploading, instead
+        // of surfacing later as an unexplained validation error.
+        compatible = false;
+        try {
+          const protoChar = await service.getCharacteristic(PROTO);
+          const pv = await protoChar.readValue();
+          const dmax = pv.getUint8(0), dmin = pv.getUint8(1), dlen = pv.getUint8(2);
+          if (PAYLOAD_VERSION >= dmin && PAYLOAD_VERSION <= dmax &&
+              dlen === MOTION_CFG_BYTES) {
+            compatible = true;
+          } else {
+            log(T.logProtoMismatch(dmax, dmin, dlen));
+          }
+        } catch (_) {
+          log(T.logProtoMissing);
+        }
         // Older firmware has no Motion characteristic; degrade gracefully.
         motionChar = null;
         try {
           motionChar = await service.getCharacteristic(MOTION);
           const v = await motionChar.readValue();
-          if (v.byteLength >= 14 && v.getUint8(0)) {
+          if (v.byteLength >= 16 && v.getUint8(0)) {
             // Frame numbers are payload-specific and reset per loaded file,
             // so only the scalar settings are restored here. The loop
             // checkbox stays locked until a multi-frame file is loaded.
             if (!$('m-loop').disabled) $('m-loop').checked = false;
-            $('m-speed').value = v.getUint8(9);
-            $('m-gap').value = v.getUint16(10, true);
-            $('bg').value = c565ToHex(v.getUint16(12, true));
+            $('m-speed').value = v.getUint8(11);
+            $('m-gap').value = v.getUint16(12, true);
+            $('bg').value = c565ToHex(v.getUint16(14, true));
             updateMotionVis();
           }
         } catch (_) {}
@@ -417,7 +462,7 @@
           log(T.logStatus(T.statusNames[v] ?? v));
         });
         setConnStatus(T.connOk, 'connected');
-        $('upload').disabled = (payload === null);
+        $('upload').disabled = (payload === null) || !compatible;
         $('revert').disabled = false;
         $('disconnect').disabled = false;
         log(T.logConnected);
@@ -439,7 +484,7 @@
     // Markers (abs 1-based GIF frames): rs/re = range, m = entry end (=intro
     // start), l = loop start (l == m -> no intro), o = outro start (null =
     // none), x = exit start (null = reuse entry).
-    const stripState = { n: 0, rs: 1, re: 1, m: 2, l: 2, o: null, x: null };
+    const stripState = { n: 0, rs: 1, re: 1, m: 2, l: 2, sh: null, o: null, x: null };
     const CELL = 46;   // thumb box 42px (canvas 40 + 1px borders) + 4px gap
     let segEls = null;
     let pvFrames = [];   // full-size composed frame canvases, for the preview
@@ -474,6 +519,7 @@
         label.textContent = i;
         d.appendChild(c);
         d.appendChild(label);
+        d.addEventListener('click', () => pvShowFrame(i));
         strip.appendChild(d);
       }
       buildSegbar();
@@ -490,6 +536,7 @@
         ['bentry', 'band entry', T.segEntry],
         ['btin', 'band tin', T.segTIn],
         ['bmain', 'band main', T.segMain],
+        ['bshake', 'band shake', T.segShake],
         ['btout', 'band tout', T.segTOut],
         ['bexit', 'band exit', T.segExit],
         ['btrimR', 'band trim', ''],
@@ -500,7 +547,7 @@
         bar.appendChild(d);
         segEls[key] = d;
       }
-      for (const kind of ['trimL', 'divM', 'divL', 'divO', 'divX', 'trimR']) {
+      for (const kind of ['trimL', 'divM', 'divL', 'divS', 'divO', 'divX', 'trimR']) {
         const h = document.createElement('div');
         h.className = 'handle';
         h.dataset.kind = kind;
@@ -510,7 +557,7 @@
     };
 
     const updateStrip = () => {
-      const { n, rs, re, m, l, o, x } = stripState;
+      const { n, rs, re, m, l, sh, o, x } = stripState;
       [...$('strip').children].forEach((d, idx) => {
         const i = idx + 1;
         d.classList.toggle('out', i < rs || i > re);
@@ -523,11 +570,14 @@
         el.style.left = ((a - 1) * CELL) + 'px';
         el.style.width = ((b - a + 1) * CELL - 4) + 'px';
       };
-      const loopLast = o ? o - 1 : (x ? x - 1 : re);
+      const afterShake = o ? o - 1 : (x ? x - 1 : re);
+      const loopLast = sh ? sh - 1 : afterShake;
       place(segEls.btrimL, 1, rs - 1);
       place(segEls.bentry, rs, m - 1);
       place(segEls.btin, m, l - 1);
       place(segEls.bmain, l, loopLast);
+      if (sh) place(segEls.bshake, sh, afterShake);
+      else segEls.bshake.style.display = 'none';
       if (o) place(segEls.btout, o, x ? x - 1 : re);
       else segEls.btout.style.display = 'none';
       if (x) place(segEls.bexit, x, re);
@@ -542,12 +592,14 @@
       placeHandle(segEls.trimL, rs - 1);
       placeHandle(segEls.divM, m - 1, m > rs);
       placeHandle(segEls.divL, l - 1, l > m);
+      placeHandle(segEls.divS, sh ? sh - 1 : 0, !!sh);
       placeHandle(segEls.divO, o ? o - 1 : 0, !!o);
       placeHandle(segEls.divX, x ? x - 1 : 0, !!x);
       placeHandle(segEls.trimR, re);
       // Reflect segment existence (drag-off removal / normalize drops too)
       $('e-on').checked = (m > rs);
       $('ti-on').checked = (l > m);
+      $('sh-on').checked = !!sh;
       $('to-on').checked = !!o;
       $('x-on').checked = !!x;
     };
@@ -574,6 +626,10 @@
         const hi = s.x ? s.x - 1 : s.re;
         if (!(s.o > s.l && s.o <= hi)) s.o = null;
       }
+      if (s.sh !== null) {
+        const hi = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+        if (!(s.sh > s.l && s.sh <= hi)) s.sh = null;
+      }
       syncMarkerInputs();
       updateStrip();
     };
@@ -594,10 +650,14 @@
           break;
         }
         case 'divL':
-          s.l = clampI(b + 1, s.m + 1, s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re));
+          s.l = clampI(b + 1, s.m + 1,
+            s.sh ? s.sh - 1 : (s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re)));
+          break;
+        case 'divS':
+          s.sh = clampI(b + 1, s.l + 1, s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re));
           break;
         case 'divO':
-          s.o = clampI(b + 1, s.l + 1, s.x ? s.x - 1 : s.re);
+          s.o = clampI(b + 1, (s.sh ? s.sh : s.l) + 1, s.x ? s.x - 1 : s.re);
           break;
         case 'divX':
           if (b >= s.re) s.x = null;     // dragged off the end -> no exit
@@ -634,6 +694,7 @@
       if ($('e-on').checked) {
         if (s.re <= s.rs) {              // no room for entry + main
           $('e-on').checked = false;
+          log(T.logSegNoRoom(T.eOnLabel));
           return;
         }
         s.m = s.rs + 1;
@@ -648,6 +709,7 @@
       if ($('ti-on').checked) {
         if (s.m <= s.rs || s.re <= s.m) {  // needs an entry and a loop frame
           $('ti-on').checked = false;
+          log(T.logSegNoRoom(T.tiOnLabel));
           return;
         }
         s.l = s.m + 1;
@@ -657,12 +719,29 @@
       normalizeMarkers();
     });
 
+    $('sh-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('sh-on').checked) {
+        const cand = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+        if (cand <= s.l) {               // no room after the loop
+          $('sh-on').checked = false;
+          log(T.logSegNoRoom(T.shOnLabel));
+          return;
+        }
+        s.sh = cand;                     // 1 frame just before outro/exit/end
+      } else {
+        s.sh = null;
+      }
+      normalizeMarkers();
+    });
+
     $('to-on').addEventListener('change', () => {
       const s = stripState;
       if ($('to-on').checked) {
         const cand = s.x ? s.x - 1 : s.re;  // one frame just before exit/end
-        if (cand <= s.l) {
+        if (cand <= (s.sh || s.l)) {
           $('to-on').checked = false;
+          log(T.logSegNoRoom(T.toOnLabel));
           return;
         }
         s.o = cand;
@@ -677,13 +756,16 @@
       if ($('x-on').checked) {
         if (s.re <= s.l) {               // no room after the loop at all
           $('x-on').checked = false;
+          log(T.logSegNoRoom(T.xOnLabel));
           return;
         }
         // Default to a 1-frame exit at the end. An outro sitting on the last
         // frame steps back one to make room (dropped when that leaves it
         // without room of its own).
         if (s.o && s.o >= s.re) {
-          s.o = (s.re - 1 > s.l) ? s.re - 1 : null;
+          s.o = (s.re - 1 > (s.sh || s.l)) ? s.re - 1 : null;
+        } else if (s.sh && s.sh >= s.re) {
+          s.sh = (s.re - 1 > s.l) ? s.re - 1 : null;
         }
         s.x = s.re;
       } else {
@@ -699,6 +781,7 @@
       s.re = s.n;
       s.m = Math.min(2, s.n);
       s.l = s.m;
+      s.sh = null;
       s.o = null;
       s.x = null;
       normalizeMarkers();
@@ -740,6 +823,7 @@
       stripState.re = n;
       stripState.m = Math.min(2, n);
       stripState.l = stripState.m;
+      stripState.sh = null;
       stripState.o = null;
       stripState.x = null;
       syncMarkerInputs();
@@ -754,7 +838,8 @@
     // canvas mirrors the device: 240px disc, bg fill, 2x sprite scale.
     const pvState = {
       running: false, phase: 'gap', frame: 1, frameDue: 0,
-      pos: 0, gapUntil: 0, passes: 0, last: 0, raf: 0,
+      pos: 0, gapUntil: 0, passes: 0, shakeDone: false, shakeReq: false,
+      last: 0, raf: 0,
     };
 
     const pvDur = (f) => {
@@ -766,13 +851,15 @@
 
     const pvSegs = () => {
       const s = stripState;
-      const loopLast = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+      const afterShake = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+      const loopLast = s.sh ? s.sh - 1 : afterShake;
       const loop = [s.l, loopLast];
       const entry = s.m > s.rs ? [s.rs, s.m - 1] : null;
       return {
         loop,
         enter: entry || loop,
         intro: s.l > s.m ? [s.m, s.l - 1] : null,
+        shake: s.sh ? [s.sh, afterShake] : null,
         outro: s.o ? [s.o, s.x ? s.x - 1 : s.re] : null,
         exit: s.x ? [s.x, s.re] : (entry || loop),
       };
@@ -795,9 +882,10 @@
         else if (f < s.l) key = 'btin';
         else if (s.x && f >= s.x) key = 'bexit';
         else if (s.o && f >= s.o) key = 'btout';
+        else if (s.sh && f >= s.sh) key = 'bshake';
         else key = 'bmain';
       }
-      for (const k of ['bentry', 'btin', 'bmain', 'btout', 'bexit']) {
+      for (const k of ['bentry', 'btin', 'bmain', 'bshake', 'btout', 'bexit']) {
         segEls[k].classList.toggle('playing', k === key);
       }
     };
@@ -849,6 +937,7 @@
               p.pos = maxShift;
               p.frame = seg.enter[0];
               p.frameDue = now + pvDur(p.frame);
+              p.shakeDone = false;
             }
             break;
           case 'enter':
@@ -883,9 +972,22 @@
             break;
           case 'main':
             if (now >= p.frameDue) {
+              if (p.shakeReq && seg.shake) {
+                p.shakeReq = false;
+                p.phase = 'shake';
+                p.frame = seg.shake[0];
+                p.frameDue = now + pvDur(p.frame);
+                break;
+              }
+              p.shakeReq = false;
               if (p.frame >= seg.loop[1]) {
                 p.passes++;
-                if (p.passes < 2) {
+                // 2 passes -> shake once -> 1 more pass -> leave, so both
+                // shake boundaries are visible in the preview.
+                if (seg.shake && p.passes >= 2 && !p.shakeDone) {
+                  p.phase = 'shake';
+                  p.frame = seg.shake[0];
+                } else if (p.passes < (p.shakeDone ? 3 : 2)) {
                   p.frame = seg.loop[0];
                 } else if (seg.outro) {
                   p.phase = 'tout';
@@ -895,6 +997,18 @@
                   p.pos = 0;
                   p.frame = seg.exit[0];
                 }
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'shake':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.shake[1]) {
+                p.phase = 'main';
+                p.frame = seg.loop[0];
+                p.shakeDone = true;
               } else {
                 p.frame++;
               }
@@ -939,6 +1053,8 @@
       pvState.frame = stripState.rs;
       pvState.frameDue = 0;
       pvState.passes = 0;
+      pvState.shakeDone = false;
+      pvState.shakeReq = false;
       pvState.last = performance.now();
       $('pv-play').textContent = T.pvStop;
       pvState.raf = requestAnimationFrame(pvTick);
@@ -955,6 +1071,22 @@
     $('pv-play').addEventListener('click', () => {
       if (pvState.running) pvStop();
       else pvStart();
+    });
+
+    // Clicking a thumbnail shows that frame in the device mock (stopping a
+    // running preview) with the timeline highlight following along.
+    const pvShowFrame = (i) => {
+      pvStop();
+      pvState.phase = 'main';
+      pvState.frame = i;
+      pvState.pos = 0;
+      pvDraw();
+    };
+
+    // Clicking the device mock during the main loop requests a shake; it
+    // takes effect on the next frame boundary, matching the firmware.
+    $('pv').addEventListener('click', () => {
+      if (pvState.running && pvState.phase === 'main') pvState.shakeReq = true;
     });
 
     // Read the selected range as [start, end] (1-based, inclusive), clamped
@@ -980,7 +1112,7 @@
         updateStrip();
         payload = buildPayload(lastComposed);
         log(T.logBuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
-        if (server && server.connected) $('upload').disabled = false;
+        if (server && server.connected && compatible) $('upload').disabled = false;
       } catch (err) {
         log(T.logParseError(err.message));
         payload = null;
@@ -1042,8 +1174,9 @@
     });
 
     // ---- Motion config ----
-    // 14 bytes: [enabled, mainStart LE u16, loopStart LE u16, outStart LE
-    // u16, exitStart LE u16, speed px/s, gap LE u16 ms, bg RGB565 LE u16],
+    // 16 bytes: [enabled, mainStart LE u16, loopStart LE u16, shakeStart
+    // LE u16, outStart LE u16, exitStart LE u16, speed px/s, gap LE u16 ms,
+    // bg RGB565 LE u16],
     // all frame values 0-based relative to the trimmed payload (see the
     // firmware header for segment semantics and sentinels). Sent
     // automatically after each commit (a commit resets the device-side
@@ -1068,6 +1201,7 @@
       const on = motionEnabled() ? 1 : 0;
       const start = Math.max(0, s.m - s.rs);
       const loop = Math.max(0, s.l - s.rs);
+      const shake = s.sh ? (s.sh - s.rs) : 0;
       const out = s.o ? (s.o - s.rs) : 0;
       const exit = s.x ? (s.x - s.rs) : 0;
       const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
@@ -1079,12 +1213,16 @@
         on,
         start & 0xFF, start >> 8,
         loop & 0xFF, loop >> 8,
+        shake & 0xFF, shake >> 8,
         out & 0xFF, out >> 8,
         exit & 0xFF, exit >> 8,
         speed,
         gap & 0xFF, gap >> 8,
         bg & 0xFF, bg >> 8,
       ]);
+      // The firmware validates at receive time and rejects invalid configs
+      // outright (surfaced via the Status notification), so a successful
+      // write means "applied exactly as sent".
       try {
         await motionChar.writeValueWithResponse(b);
         log(T.logMotionSent(on, start));
@@ -1213,32 +1351,138 @@
       // Render preview of 1st packed frame
       drawPackedTo($('prev'), packed[0], palette, size, bpp);
 
-      // Per-frame records (RLE-compressed): keyframe when first or when the
-      // encoded diff isn't smaller than the encoded full frame.
+      // Per-frame records (RLE-compressed): cheapest of keyframe, diff vs
+      // previous frame, or diff vs an earlier reference frame (v5), chosen
+      // under a playback-cost bound, not just size:
+      //  - refs may only target frames encoded as keyframes, so decoding a
+      //    ref frame costs one keyframe + its rects (never a chain replay);
+      //    popular targets found in a provisional pass get promoted.
+      //  - a keyframe is forced whenever the replay window since the last
+      //    one exceeds COST_LIMIT pixels, bounding loop-wrap / segment-jump
+      //    recompose (checkpoints placed by accumulated cost — jump targets
+      //    are structural here, so no periodic GOP-style spacing).
       const frameBytes = size * size * bpp / 8;
-      let keyframes = 0;
-      const records = packed.map((cur, i) => {
+      const framePx = size * size;
+      // Jump (wrap/segment-entry) replay bound. v4-era payloads replayed
+      // ~8 full frames per wrap without visible stutter, so that level is
+      // kept; the per-frame advance cost is what the ref->keyframe rule
+      // bounds tightly.
+      const COST_LIMIT = 8 * framePx;
+      const encodeRects = (base, cur) => {
+        const rects = diffRects(base, cur, size, bpp);
+        for (const rc of rects) rc.rle = rleEncode(rc.data);
+        return rects;
+      };
+      const rectsSize = rects => 1 + rects.reduce((a, rc) => a + 6 + rc.rle.length, 0);
+      const rectsPx = rects => rects.reduce((a, rc) => a + rc.w * rc.h, 0);
+      const REF_CANDIDATES = 32;    // most recent eligible targets to try
+
+      const clampDur = (i) => {
         // gifuct-js delay is already in milliseconds. Clamp / fallback for
         // GIFs that report 0 or absurdly large.
         let dur = composed[i].delay | 0;
         if (dur < 20) dur = 100;
         if (dur > 65535) dur = 65535;
-        const keyRle = rleEncode(cur);
-        if (i > 0) {
-          const rects = diffRects(packed[i - 1], cur, size, bpp);
-          for (const rc of rects) rc.rle = rleEncode(rc.data);
-          const diffSize = 1 + rects.reduce((a, rc) => a + 6 + rc.rle.length, 0);
-          if (diffSize < 2 + keyRle.length) return { dur, rects };
-        }
-        keyframes++;
-        return { dur, full: keyRle };
-      });
+        return dur;
+      };
 
-      // Assemble payload (v4)
+      // Provisional pass: find each frame's best size-only choice and best
+      // ref target, then promote a target to keyframe only when the total
+      // bytes its referrers save exceed what promoting it costs.
+      const keyRles = packed.map(f => rleEncode(f));
+      const provTargets = new Set();
+      {
+        const nonRefBest = [];       // min(keyframe, prev-diff) per frame
+        const bestRef = [];          // cheapest {r, size} per frame, or null
+        const provSize = [];         // provisionally chosen record size
+        const refFree = [0];
+        let windowHasRef = false;
+        nonRefBest[0] = provSize[0] = 2 + keyRles[0].length;
+        bestRef[0] = null;
+        for (let i = 1; i < packed.length; i++) {
+          const keySize = 2 + keyRles[i].length;
+          const prevSize = rectsSize(encodeRects(packed[i - 1], packed[i]));
+          nonRefBest[i] = Math.min(keySize, prevSize);
+          bestRef[i] = null;
+          for (const r of refFree.slice(-REF_CANDIDATES)) {
+            const s = 2 + rectsSize(encodeRects(packed[r], packed[i]));
+            if (!bestRef[i] || s < bestRef[i].size) bestRef[i] = { r, size: s };
+          }
+          const refWins = bestRef[i] && bestRef[i].size < nonRefBest[i];
+          provSize[i] = refWins ? bestRef[i].size : nonRefBest[i];
+          if (refWins) windowHasRef = true;
+          else if (keySize <= prevSize) { windowHasRef = false; refFree.push(i); }
+          else if (!windowHasRef) refFree.push(i);
+        }
+        const gain = new Map();
+        for (let i = 1; i < packed.length; i++) {
+          const br = bestRef[i];
+          if (br && br.size < nonRefBest[i]) {
+            gain.set(br.r, (gain.get(br.r) || 0) + (nonRefBest[i] - br.size));
+          }
+        }
+        for (const [r, g] of gain) {
+          const promoCost = Math.max(0, (2 + keyRles[r].length) - provSize[r]);
+          if (g > promoCost) provTargets.add(r);
+        }
+      }
+
+      // Final pass under the cost bound.
+      let keyframes = 0;
+      let refCount = 0;
+      let windowCost = 0;          // replay pixels since the last keyframe
+      let maxAdvance = 0;          // worst single frame-advance cost
+      let maxJump = 0;             // worst composeChainInto cost
+      const keyIdxs = [];          // frames encoded as keyframes (ref targets)
+      const records = [];
+      for (let i = 0; i < packed.length; i++) {
+        const cur = packed[i];
+        const dur = clampDur(i);
+        const keyRle = keyRles[i];
+        let choice = { rec: { dur, full: keyRle }, advPx: framePx };
+        if (i > 0 && !provTargets.has(i)) {
+          const keySize = 2 + keyRle.length;
+          let bestSize = keySize;
+          const prevRects = encodeRects(packed[i - 1], cur);
+          if (rectsSize(prevRects) < bestSize) {
+            bestSize = rectsSize(prevRects);
+            choice = { rec: { dur, rects: prevRects }, advPx: rectsPx(prevRects) };
+          }
+          for (const r of keyIdxs.slice(-REF_CANDIDATES)) {
+            const refRects = encodeRects(packed[r], cur);
+            const s = 2 + rectsSize(refRects);
+            if (s < bestSize) {
+              bestSize = s;
+              choice = {
+                rec: { dur, ref: r, rects: refRects },
+                advPx: framePx + rectsPx(refRects),   // key decode + patches
+              };
+            }
+          }
+          if (choice.rec.full === undefined &&
+              windowCost + choice.advPx > COST_LIMIT) {
+            choice = { rec: { dur, full: keyRle }, advPx: framePx };
+          }
+        }
+        records.push(choice.rec);
+        if (choice.rec.full !== undefined) {
+          keyframes++;
+          keyIdxs.push(i);
+          windowCost = 0;
+        } else {
+          if (choice.rec.ref !== undefined) refCount++;
+          windowCost += choice.advPx;
+        }
+        maxAdvance = Math.max(maxAdvance, choice.advPx);
+        maxJump = Math.max(maxJump, framePx + windowCost);
+      }
+
+      // Assemble payload (v5)
       const N = records.length;
       const palBytes = K * 2;
       const recSize = r => 3 + (r.full ? 2 + r.full.length
-        : 1 + r.rects.reduce((a, rc) => a + 6 + rc.rle.length, 0));
+        : (r.ref !== undefined ? 2 : 0) +
+          1 + r.rects.reduce((a, rc) => a + 6 + rc.rle.length, 0));
       const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
       if (total > UPLOAD_BUF) {
         throw new Error(T.errTooBig(total, UPLOAD_BUF, N, size, K));
@@ -1247,7 +1491,7 @@
       const out = new Uint8Array(total);
       out[0] = 0x50;          // 'P'
       out[1] = 0x50;          // 'P'
-      out[2] = 4;             // version
+      out[2] = PAYLOAD_VERSION;
       out[3] = N & 0xFF;      // frame count (uint16 LE)
       out[4] = (N >> 8) & 0xFF;
       out[5] = size;
@@ -1263,13 +1507,17 @@
       for (const r of records) {
         out[off++] = r.dur & 0xFF;
         out[off++] = (r.dur >> 8) & 0xFF;
-        out[off++] = r.full ? 1 : 0;   // flags: bit0 = keyframe
+        out[off++] = r.full ? 1 : (r.ref !== undefined ? 2 : 0);  // flags
         if (r.full) {
           out[off++] = r.full.length & 0xFF;
           out[off++] = (r.full.length >> 8) & 0xFF;
           out.set(r.full, off);
           off += r.full.length;
         } else {
+          if (r.ref !== undefined) {
+            out[off++] = r.ref & 0xFF;
+            out[off++] = (r.ref >> 8) & 0xFF;
+          }
           out[off++] = r.rects.length;
           for (const rc of r.rects) {
             out[off++] = rc.x; out[off++] = rc.y;
@@ -1282,6 +1530,7 @@
         }
       }
       log(T.logFrameStats(keyframes, N - keyframes, (total / N).toFixed(0), frameBytes + 3));
+      log(T.logDecodeCost(maxAdvance, maxJump, framePx));
       return out;
     }
 
