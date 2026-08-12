@@ -9,10 +9,24 @@
 //   Upload  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF02
 //   Commit  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF03
 //   Status  (Read/Notify): 5550EEC9-B00F-4444-9876-AB12CD34EF04
+//   Motion  (Read/Write):  5550EEC9-B00F-4444-9876-AB12CD34EF05
 //
 //   Upload: chunked writes appended in order to a 32 KB buffer.
 //   Commit: 0x01 = validate & swap, 0x02 = buffer reset, 0x03 = revert default.
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
+//   Motion: 10 bytes [enabled, mainStart lo/hi, exitStart lo/hi, speed,
+//                     gap lo/hi, bg565 lo/hi].
+//     Splits the uploaded animation into an entry walk segment [0, mainStart),
+//     a main segment and an optional exit walk segment: exitStart = 0 reuses
+//     the entry segment for the exit (main = [mainStart, N)), otherwise
+//     main = [mainStart, exitStart) and exit = [exitStart, N). When enabled,
+//     the sprite walks in from the right (walk segment looping, translating
+//     at `speed` source px/s), plays the main segment at center — looping
+//     while device handling is detected via the accelerometer — then exits
+//     left and the screen stays empty for `gap` ms before the next entry.
+//     bg565 fills everything outside the sprite (RGB565), matching the
+//     uploader's compositing background. Cleared by image commit / revert;
+//     the uploader re-sends it after each upload. Persisted to /motion.bin.
 //
 // Payload (sent via Upload, raw bytes appended in order):
 //   v1 (64x64 fixed):
@@ -73,6 +87,7 @@
 #define BLE_UPLOAD_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef02"
 #define BLE_COMMIT_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef03"
 #define BLE_STATUS_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef04"
+#define BLE_MOTION_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef05"
 
 static constexpr uint8_t MAX_UPLOADED_FRAMES = 16;
 
@@ -304,10 +319,34 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-// Point the renderer at the active source's dimensions
+// ---- Motion (walk-in / walk-out) config ----
+// Set over BLE, persisted to /motion.bin, cleared whenever the image source
+// changes (frame indices are payload-specific).
+struct MotionConfig {
+  uint8_t  enabled;    // 0 = plain in-place loop (legacy behavior)
+  uint16_t mainStart;  // first frame of the main segment; entry walk = [0, mainStart)
+  uint16_t exitStart;  // first frame of the exit walk segment; 0 = reuse entry
+  uint8_t  speed;      // traverse speed, source px/s
+  uint16_t gapMs;      // empty-screen time after exit before re-entry
+  uint16_t bg;         // RGB565 fill outside the sprite / for empty screen
+};
+static MotionConfig motionCfg = { 0, 1, 0, 60, 1000, 0x0000 };
+
+#define MOTION_PATH "/motion.bin"
+static constexpr size_t MOTION_CFG_LEN = 10;
+
+static volatile uint8_t motionCfgPending[MOTION_CFG_LEN];
+static volatile bool motionCfgWritten = false;
+static bool motionPersistPending = false;
+static bool motionClearPending = false;
+
+static inline bool motionOn() { return motionCfg.enabled && uploadedActive; }
+
+// Point the renderer at the active source's dimensions. Motion needs the full
+// 240px window regardless of source size so the traverse path isn't cropped.
 static void applyActiveSource() {
   srcSize = uploadedActive ? upSize : IMG_W;
-  outSize = (srcSize >= 120) ? 240 : 192;
+  outSize = (srcSize >= 120 || motionOn()) ? 240 : 192;
 }
 
 // ---- Compose dispatchers ----
@@ -432,7 +471,10 @@ static uint16_t getNextFrame(uint16_t idx) {
 }
 
 // Reverse-rotate source buffer onto a centered OUT_SIZE x OUT_SIZE region.
-static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
+// walkShift displaces the sprite along its own horizontal axis (source px,
+// positive = right); the axis rotates with the tilt bins, so the sprite
+// always walks perpendicular to gravity.
+static void drawFrameRotated(const uint16_t* src, uint8_t bin, int16_t walkShift) {
   const int32_t cosT = COS64[bin & 0x3F];
   const int32_t sinT = SIN64[bin & 0x3F];
 
@@ -443,6 +485,7 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
 
   const int8_t SHIFT = 15 + SCALE_SHIFT;
   const int16_t srcHalf = srcSize / 2;
+  const int16_t srcCX = srcHalf - walkShift;
   const uint16_t sz = srcSize;
 
   for (int16_t oy = 0; oy < outSize; oy++) {
@@ -451,13 +494,13 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
     int32_t cyCos = cy * cosT;
     for (int16_t ox = 0; ox < outSize; ox++) {
       int32_t cx = ox - outHalf;
-      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + srcHalf;
+      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + srcCX;
       int16_t sy = (int16_t)(((-cx * sinT) + cyCos) >> SHIFT) + srcHalf;
       uint16_t c;
       if ((uint16_t)sx < sz && (uint16_t)sy < sz) {
         c = src[(uint32_t)sy * sz + sx];
       } else {
-        c = 0x0000;
+        c = motionCfg.bg;
       }
       txRowBuf[ox] = c;
     }
@@ -766,6 +809,229 @@ static void animAdvance() {
   }
 }
 
+// Compose an arbitrary frame into frameBuf. For v3 this replays the diff
+// chain from the nearest keyframe at or before the target (frame 0 is always
+// a keyframe, so this terminates). Walk segments are short, so the replay on
+// a segment jump costs a few small decodes at most.
+static void animJumpTo(uint16_t target) {
+  if (target >= uploadedFrameCount) target = 0;
+  if (uploadedActive && upVer == 3) {
+    uint32_t off = upDataOff;
+    uint32_t keyOff = upDataOff;
+    uint16_t keyIdx = 0;
+    for (uint16_t i = 1; i <= target; i++) {
+      off = v3NextRecord(off);
+      if (uploadBuf[off + 2] & 0x01) { keyOff = off; keyIdx = i; }
+    }
+    upCurRec = keyOff;
+    v3Decode(upCurRec, frameBuf);
+    for (uint16_t i = keyIdx; i < target; i++) {
+      upCurRec = v3NextRecord(upCurRec);
+      v3Decode(upCurRec, frameBuf);
+    }
+  } else {
+    composeFrame(target, frameBuf);
+  }
+  curFrame = target;
+}
+
+// Advance within [first, last] (inclusive), wrapping back to first.
+static void animAdvanceRange(uint16_t first, uint16_t last) {
+  if (curFrame >= last) {
+    animJumpTo(first);
+    return;
+  }
+  if (uploadedActive && upVer == 3) {
+    curFrame++;
+    upCurRec = v3NextRecord(upCurRec);
+    v3Decode(upCurRec, frameBuf);
+  } else {
+    curFrame++;
+    composeFrame(curFrame, frameBuf);
+  }
+}
+
+// ---- Motion (walk-in / walk-out) runtime ----
+
+// Device-handling detection: raw accel deviating from the 200 ms lowpass by
+// more than ~0.04 g (600 counts at 16384/g) on either axis counts as
+// handling; it is considered ongoing for HANDLE_HOLD_MS after the last hit.
+static constexpr int32_t HANDLE_THRESH = 600;
+static constexpr uint32_t HANDLE_HOLD_MS = 2000;
+static uint32_t lastHandledMs = 0;
+
+enum MotionPhase : uint8_t { PH_GAP, PH_ENTER, PH_MAIN, PH_EXIT };
+static MotionPhase motionPhase = PH_GAP;
+static int32_t motionPosMpx = 0;    // sprite offset, milli-source-px, + = right
+static uint32_t motionLastMs = 0;   // last position integration time
+static uint32_t gapReadyMs = 0;     // earliest allowed re-entry
+static int16_t lastWalkShift = 0;
+
+static inline bool handledRecently(uint32_t now) {
+  return (uint32_t)(now - lastHandledMs) < HANDLE_HOLD_MS;
+}
+
+// Offset at which the sprite is fully outside the output window even when
+// rotated 45deg (source half-diagonal ~= srcSize * 1.5 / 2 on screen).
+static inline int16_t motionMaxShift() {
+  return (int16_t)((outSize / 2 + (int16_t)srcSize * 3 / 2) / 2 + 1);
+}
+
+// Segment boundaries derived from the config (all inclusive last indices).
+// exitStart = 0 means the exit reuses the entry walk segment.
+static inline uint16_t exitFirstFrame() {
+  return motionCfg.exitStart ? motionCfg.exitStart : 0;
+}
+static inline uint16_t exitLastFrame() {
+  return motionCfg.exitStart ? (uploadedFrameCount - 1)
+                             : (motionCfg.mainStart - 1);
+}
+static inline uint16_t mainLastFrame() {
+  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
+                             : (uploadedFrameCount - 1);
+}
+
+// Validate and adopt a 10-byte motion config, then restart the presentation.
+static void applyMotionCfg(const uint8_t* p) {
+  MotionConfig c;
+  c.enabled   = p[0] ? 1 : 0;
+  c.mainStart = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
+  c.exitStart = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
+  c.speed     = p[5] ? p[5] : 60;
+  c.gapMs     = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
+  c.bg        = (uint16_t)p[8] | ((uint16_t)p[9] << 8);
+  if (c.enabled &&
+      (!uploadedActive || c.mainStart < 1 || c.mainStart >= uploadedFrameCount)) {
+    c.enabled = 0;
+  }
+  // An unusable exit segment falls back to reusing the entry walk frames.
+  if (c.exitStart &&
+      (c.exitStart <= c.mainStart || c.exitStart >= uploadedFrameCount)) {
+    c.exitStart = 0;
+  }
+  motionCfg = c;
+  applyActiveSource();
+
+  uint32_t now = millis();
+  fillScreen(motionCfg.bg);
+  lastFrameTime = now;
+  motionLastMs = now;
+  if (motionOn()) {
+    // Start hidden; seed the handling timer so the sprite walks in right
+    // away (config apply and deep-sleep wake both imply the user is there).
+    motionPhase = PH_GAP;
+    gapReadyMs = now;
+    lastHandledMs = now;
+  } else {
+    animReset();
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+}
+
+static bool persistMotionCfg() {
+  if (!LittleFS.begin(true)) return false;
+  File f = LittleFS.open(MOTION_PATH, "w");
+  if (!f) return false;
+  uint8_t b[MOTION_CFG_LEN] = {
+    motionCfg.enabled,
+    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
+    motionCfg.speed,
+    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
+    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
+  };
+  size_t n = f.write(b, MOTION_CFG_LEN);
+  f.close();
+  return n == MOTION_CFG_LEN;
+}
+
+static void clearPersistedMotionCfg() {
+  if (!LittleFS.begin(true)) return;
+  if (LittleFS.exists(MOTION_PATH)) LittleFS.remove(MOTION_PATH);
+}
+
+// Restore the persisted motion config (after the image itself was restored).
+static void loadMotionCfg() {
+  if (!uploadedActive) return;
+  if (!LittleFS.begin(true)) return;
+  File f = LittleFS.open(MOTION_PATH, "r");
+  if (!f) return;
+  uint8_t b[MOTION_CFG_LEN];
+  bool ok = (f.read(b, MOTION_CFG_LEN) == MOTION_CFG_LEN);
+  f.close();
+  if (ok) applyMotionCfg(b);
+}
+
+// Per-loop motion driver: advances phase/position/frames and redraws when
+// the frame, tilt bin or walk offset changed.
+static void runMotion(uint32_t now, bool binChanged) {
+  bool redraw = binChanged;
+  int32_t dt = (int32_t)(now - motionLastMs);
+  motionLastMs = now;
+  const int32_t maxMpx = (int32_t)motionMaxShift() * 1000;
+
+  switch (motionPhase) {
+    case PH_GAP:
+      if (handledRecently(now) && (int32_t)(now - gapReadyMs) >= 0) {
+        motionPhase = PH_ENTER;
+        motionPosMpx = maxMpx;
+        animJumpTo(0);
+        lastFrameTime = now;
+        redraw = true;
+      }
+      break;
+
+    case PH_ENTER:
+    case PH_EXIT:
+      motionPosMpx -= (int32_t)motionCfg.speed * dt;
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (motionPhase == PH_ENTER) animAdvanceRange(0, motionCfg.mainStart - 1);
+        else                         animAdvanceRange(exitFirstFrame(), exitLastFrame());
+        redraw = true;
+      }
+      if (motionPhase == PH_ENTER && motionPosMpx <= 0) {
+        motionPhase = PH_MAIN;
+        motionPosMpx = 0;
+        animJumpTo(motionCfg.mainStart);
+        lastFrameTime = now;
+        redraw = true;
+      } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
+        motionPhase = PH_GAP;
+        gapReadyMs = now + motionCfg.gapMs;
+        fillScreen(motionCfg.bg);
+        return;
+      }
+      break;
+
+    case PH_MAIN:
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (curFrame >= mainLastFrame()) {
+          if (handledRecently(now)) {
+            animJumpTo(motionCfg.mainStart);   // keep looping while handled
+          } else {
+            motionPhase = PH_EXIT;
+            motionPosMpx = 0;
+            animJumpTo(exitFirstFrame());
+          }
+        } else {
+          animAdvanceRange(motionCfg.mainStart, mainLastFrame());
+        }
+        redraw = true;
+      }
+      break;
+  }
+
+  if (motionPhase == PH_GAP) return;
+  int16_t shift = (int16_t)(motionPosMpx / 1000);
+  if (shift != lastWalkShift) redraw = true;
+  if (redraw) {
+    lastWalkShift = shift;
+    drawFrameRotated(frameBuf, currentBin, shift);
+  }
+}
+
 static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
   uint8_t bestBin = 0;
   int32_t bestScore = INT32_MIN;
@@ -786,6 +1052,21 @@ static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
 
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pStatusChar = nullptr;
+static BLECharacteristic* pMotionChar = nullptr;
+
+// Reflect the currently applied config in the readable Motion characteristic.
+static void publishMotionCfg() {
+  if (!pMotionChar) return;
+  uint8_t b[MOTION_CFG_LEN] = {
+    motionCfg.enabled,
+    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
+    motionCfg.speed,
+    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
+    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
+  };
+  pMotionChar->setValue(b, MOTION_CFG_LEN);
+}
 
 static void setStatus(uint8_t s) {
   uploadStatus = s;
@@ -992,6 +1273,15 @@ class UploadCB : public BLECharacteristicCallbacks {
   }
 };
 
+class MotionCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    auto v = c->getValue();
+    if (v.length() < MOTION_CFG_LEN) return;
+    memcpy((void*)motionCfgPending, v.c_str(), MOTION_CFG_LEN);
+    motionCfgWritten = true;   // applied (and validated) in loop()
+  }
+};
+
 class CommitCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
     auto v = c->getValue();
@@ -1047,6 +1337,12 @@ static void bleSetup() {
   pStatusChar->addDescriptor(new BLE2902());
   uint8_t s0 = STATUS_IDLE;
   pStatusChar->setValue(&s0, 1);
+
+  pMotionChar = pService->createCharacteristic(
+    BLE_MOTION_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  pMotionChar->setCallbacks(new MotionCB());
+  publishMotionCfg();
 
   pService->start();
 
@@ -1104,11 +1400,16 @@ void setup() {
   // Surfaces filesystem / corruption errors via a colored splash.
   LoadResult lr = loadPersistedImage();
   showLoadError(lr);
+  loadMotionCfg();
 
   bleSetup();
 
-  animReset();
-  drawFrameRotated(frameBuf, currentBin);
+  if (!motionOn()) {
+    animReset();
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+  // else: applyMotionCfg() already primed PH_GAP with the handling timer
+  // seeded, so the sprite walks in immediately after the wake-by-motion.
 }
 
 void loop() {
@@ -1128,13 +1429,30 @@ void loop() {
 
   analogWrite(TFT_BL, (elapsed >= DIM_TIMEOUT_MS) ? 40 : 255);
 
-  // Apply pending image source switch (commit or revert).
+  // Apply pending image source switch (commit or revert). The motion config
+  // indexes frames of the previous payload, so it is cleared here; the
+  // uploader re-sends it after a commit if the user wants motion.
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
+    motionCfg = MotionConfig{ 0, 1, 0, 60, 1000, 0x0000 };
+    motionClearPending = true;
+    publishMotionCfg();
+    applyActiveSource();
     lastFrameTime = now;
     fillScreen(0x0000);  // clear stale pixels outside the new output window
     animReset();
-    drawFrameRotated(frameBuf, currentBin);
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+
+  // Apply a pending motion config write (deferred from the BLE callback so
+  // validation sees a settled image state, after any commit above).
+  if (motionCfgWritten) {
+    motionCfgWritten = false;
+    uint8_t b[MOTION_CFG_LEN];
+    memcpy(b, (const void*)motionCfgPending, MOTION_CFG_LEN);
+    applyMotionCfg(b);
+    publishMotionCfg();
+    motionPersistPending = true;
   }
 
   // Apply pending persistence operations (deferred from BLE callbacks so the
@@ -1147,6 +1465,14 @@ void loop() {
     clearPersistRequested = false;
     clearPersistedImage();
   }
+  if (motionPersistPending) {
+    motionPersistPending = false;
+    persistMotionCfg();
+  }
+  if (motionClearPending) {
+    motionClearPending = false;
+    clearPersistedMotionCfg();
+  }
 
   // Update lowpass on raw gravity vector. Blend factor is dt/tau so the
   // effective time constant stays ~LP_TAU_MS whether the loop is spinning
@@ -1155,6 +1481,12 @@ void loop() {
   if (readXYZRaw(rx, ry, rz)) {
     int32_t fx = (int32_t)rx * ACCEL_X_SIGN;
     int32_t fy = (int32_t)ry * ACCEL_Y_SIGN;
+    // Handling detection: raw deviating from the lowpass = the device is
+    // being moved by hand. Counts as activity (keeps the display awake).
+    if (labs(fx - fxLp) > HANDLE_THRESH || labs(fy - fyLp) > HANDLE_THRESH) {
+      lastHandledMs = now;
+      lastActivityMs = now;
+    }
     int32_t dt = (int32_t)(now - lastLpUpdateMs);
     if (dt > 0) {
       if (dt > LP_TAU_MS) dt = LP_TAU_MS;
@@ -1178,6 +1510,11 @@ void loop() {
     lastActivityMs = now;
   }
 
+  if (motionOn()) {
+    runMotion(now, binChanged);
+    return;
+  }
+
   uint16_t duration = getDuration(curFrame);
   bool frameAdvance = (now - lastFrameTime >= duration);
   if (frameAdvance) {
@@ -1186,6 +1523,6 @@ void loop() {
   }
 
   if (frameAdvance || binChanged) {
-    drawFrameRotated(frameBuf, currentBin);
+    drawFrameRotated(frameBuf, currentBin, 0);
   }
 }

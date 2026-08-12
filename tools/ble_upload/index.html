@@ -97,6 +97,18 @@
     <span id="f-total" class="pill"></span>
   </div>
 
+  <div class="row">
+    <label><input type="checkbox" id="m-on"> <span id="m-on-label">移動演出</span></label>
+    <label><span id="m-start-label">メイン開始</span>
+      <input type="number" id="m-start" min="1" max="65535" value="1" style="width: 4.5em"></label>
+    <label><span id="m-exit-label">退場開始</span>
+      <input type="number" id="m-exit" min="0" max="65535" value="0" style="width: 4.5em"></label>
+    <label><span id="m-speed-label">速度 (px/s)</span>
+      <input type="number" id="m-speed" min="1" max="255" value="60" style="width: 4.5em"></label>
+    <label><span id="m-gap-label">退場後の間 (ms)</span>
+      <input type="number" id="m-gap" min="0" max="65535" value="1000" style="width: 5.5em"></label>
+  </div>
+
   <div class="panel">
     <div>
       <p id="orig-label">Original (1st frame)</p>
@@ -118,6 +130,7 @@
     const UPLOAD  = '5550eec9-b00f-4444-9876-ab12cd34ef02';
     const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
+    const MOTION  = '5550eec9-b00f-4444-9876-ab12cd34ef05';
 
     // ---- Image format constants (must match firmware) ----
     // Payload v3: 8B header (magic, version=3, N uint16 LE, size, bpp, reserved)
@@ -166,6 +179,12 @@
         logDisconnecting: 'disconnecting...',
         logRevert: 'revert to default',
         logRevertError: m => `revert error: ${m}`,
+        motionOnLabel: 'Walk in/out',
+        mStartLabel: 'Main start', mExitLabel: 'Exit start',
+        mExitTitle: '0 = reuse the entry frames for the exit',
+        mSpeedLabel: 'Speed (px/s)', mGapLabel: 'Gap after exit (ms)',
+        logMotionSent: (on, s) => on ? `motion config sent (main starts at frame ${s})` : 'motion config sent (disabled)',
+        logMotionError: m => `motion config error: ${m}`,
       },
       ja: {
         connectBtn: '接続', disconnectBtn: '切断',
@@ -202,6 +221,12 @@
         logDisconnecting: '切断しています...',
         logRevert: 'デフォルトに戻します',
         logRevertError: m => `リバートエラー: ${m}`,
+        motionOnLabel: '移動演出',
+        mStartLabel: 'メイン開始', mExitLabel: '退場開始',
+        mExitTitle: '0 = 入場フレームを退場にも使う',
+        mSpeedLabel: '速度 (px/s)', mGapLabel: '退場後の間 (ms)',
+        logMotionSent: (on, s) => on ? `移動設定を送信しました (メイン開始: フレーム${s})` : '移動設定を送信しました (無効)',
+        logMotionError: m => `移動設定エラー: ${m}`,
       },
     };
     const LANG = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
@@ -241,6 +266,12 @@
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
     $('prev-label').textContent = T.prevLabelInitial;
+    $('m-on-label').textContent = T.motionOnLabel;
+    $('m-start-label').textContent = T.mStartLabel;
+    $('m-exit-label').textContent = T.mExitLabel;
+    $('m-exit').title = T.mExitTitle;
+    $('m-speed-label').textContent = T.mSpeedLabel;
+    $('m-gap-label').textContent = T.mGapLabel;
 
     if (!navigator.bluetooth) {
       const div = document.createElement('div');
@@ -250,7 +281,7 @@
     }
 
     // ---- BLE state ----
-    let device, server, uploadChar, commitChar, statusChar;
+    let device, server, uploadChar, commitChar, statusChar, motionChar;
     let payload = null;
     let lastComposed = null;  // {composed: [{delay, imageData}], W, H} — for rebuild on size change
 
@@ -274,6 +305,20 @@
         uploadChar = await service.getCharacteristic(UPLOAD);
         commitChar = await service.getCharacteristic(COMMIT);
         statusChar = await service.getCharacteristic(STATUS);
+        // Older firmware has no Motion characteristic; degrade gracefully.
+        motionChar = null;
+        try {
+          motionChar = await service.getCharacteristic(MOTION);
+          const v = await motionChar.readValue();
+          if (v.byteLength >= 10 && v.getUint8(0)) {
+            $('m-on').checked = true;
+            $('m-start').value = v.getUint16(1, true);
+            $('m-exit').value = v.getUint16(3, true);
+            $('m-speed').value = v.getUint8(5);
+            $('m-gap').value = v.getUint16(6, true);
+            $('bg').value = c565ToHex(v.getUint16(8, true));
+          }
+        } catch (_) {}
         await statusChar.startNotifications();
         statusChar.addEventListener('characteristicvaluechanged', (e) => {
           const v = e.target.value.getUint8(0);
@@ -372,12 +417,62 @@
         const t1 = performance.now();
         log(T.logUploaded(((t1 - t0) / 1000).toFixed(2)));
         await commitChar.writeValueWithResponse(new Uint8Array([0x01]));
+        // Commit resets the device-side motion config, so the settings ride
+        // along with every upload (including bg for the walk backdrop).
+        if (motionChar) await sendMotion();
       } catch (e) {
         log(T.logUploadError(e.message));
       } finally {
         $('upload').disabled = false;
       }
     });
+
+    // ---- Motion config ----
+    // 10 bytes: [enabled, mainStart LE u16, exitStart LE u16, speed px/s,
+    // gap LE u16 ms, bg RGB565 LE u16]. Sent automatically after each commit
+    // (a commit resets the device-side config). The firmware validates the
+    // frame numbers against the committed frame count and falls back to
+    // disabled / entry-reuse when they are out of range.
+    const hexTo565 = (h) => {
+      const n = parseInt(h.slice(1), 16);
+      return ((((n >> 16) & 0xFF) >> 3) << 11) |
+             ((((n >> 8) & 0xFF) >> 2) << 5) |
+             ((n & 0xFF) >> 3);
+    };
+    const c565ToHex = (c) => {
+      const r5 = (c >> 11) & 0x1F, g6 = (c >> 5) & 0x3F, b5 = c & 0x1F;
+      const r = (r5 << 3) | (r5 >> 2);
+      const g = (g6 << 2) | (g6 >> 4);
+      const b = (b5 << 3) | (b5 >> 2);
+      return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+    };
+
+    const sendMotion = async () => {
+      const on = $('m-on').checked ? 1 : 0;
+      const start = Math.min(Math.max($('m-start').value | 0, 1), 65535);
+      const exit = Math.min(Math.max($('m-exit').value | 0, 0), 65535);
+      const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
+      const gap = Math.min(Math.max($('m-gap').value | 0, 0), 65535);
+      $('m-start').value = start;
+      $('m-exit').value = exit;
+      $('m-speed').value = speed;
+      $('m-gap').value = gap;
+      const bg = hexTo565($('bg').value);
+      const b = new Uint8Array([
+        on,
+        start & 0xFF, start >> 8,
+        exit & 0xFF, exit >> 8,
+        speed,
+        gap & 0xFF, gap >> 8,
+        bg & 0xFF, bg >> 8,
+      ]);
+      try {
+        await motionChar.writeValueWithResponse(b);
+        log(T.logMotionSent(on, start));
+      } catch (e) {
+        log(T.logMotionError(e.message));
+      }
+    };
 
     // ---- Disconnect ----
     $('disconnect').addEventListener('click', () => {
