@@ -19,7 +19,9 @@
 //     Splits the uploaded animation into an entry walk segment [0, mainStart),
 //     a main segment and an optional exit walk segment: exitStart = 0 reuses
 //     the entry segment for the exit (main = [mainStart, N)), otherwise
-//     main = [mainStart, exitStart) and exit = [exitStart, N). When enabled,
+//     main = [mainStart, exitStart) and exit = [exitStart, N). mainStart = 0
+//     means no entry segment: the main segment itself plays while walking
+//     in (and out, when it has no exit fallback either). When enabled,
 //     the sprite walks in from the right (walk segment looping, translating
 //     at `speed` source px/s), plays the main segment at center — looping
 //     while device handling is detected via the accelerometer — then exits
@@ -979,17 +981,23 @@ static inline int16_t motionMaxShift() {
 }
 
 // Segment boundaries derived from the config (all inclusive last indices).
-// exitStart = 0 means the exit reuses the entry walk segment.
+// exitStart = 0 means the exit reuses the entry walk segment; mainStart = 0
+// means there is no entry segment and the walk phases fall back to playing
+// the main segment while translating.
+static inline bool hasEntrySeg() { return motionCfg.mainStart > 0; }
+static inline uint16_t mainLastFrame() {
+  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
+                             : (uploadedFrameCount - 1);
+}
+static inline uint16_t enterLastFrame() {
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : mainLastFrame();
+}
 static inline uint16_t exitFirstFrame() {
   return motionCfg.exitStart ? motionCfg.exitStart : 0;
 }
 static inline uint16_t exitLastFrame() {
-  return motionCfg.exitStart ? (uploadedFrameCount - 1)
-                             : (motionCfg.mainStart - 1);
-}
-static inline uint16_t mainLastFrame() {
-  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
-                             : (uploadedFrameCount - 1);
+  if (motionCfg.exitStart) return uploadedFrameCount - 1;
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : mainLastFrame();
 }
 
 // Validate and adopt a 10-byte motion config, then restart the presentation.
@@ -1002,7 +1010,7 @@ static void applyMotionCfg(const uint8_t* p) {
   c.gapMs     = (uint16_t)p[6] | ((uint16_t)p[7] << 8);
   c.bg        = (uint16_t)p[8] | ((uint16_t)p[9] << 8);
   if (c.enabled &&
-      (!uploadedActive || c.mainStart < 1 || c.mainStart >= uploadedFrameCount)) {
+      (!uploadedActive || c.mainStart >= uploadedFrameCount)) {
     c.enabled = 0;
   }
   // An unusable exit segment falls back to reusing the entry walk frames.
@@ -1087,15 +1095,19 @@ static void runMotion(uint32_t now, bool binChanged) {
       motionPosMpx -= (int32_t)motionCfg.speed * dt;
       if (now - lastFrameTime >= getDuration(curFrame)) {
         lastFrameTime = now;
-        if (motionPhase == PH_ENTER) animAdvanceRange(0, motionCfg.mainStart - 1);
+        if (motionPhase == PH_ENTER) animAdvanceRange(0, enterLastFrame());
         else                         animAdvanceRange(exitFirstFrame(), exitLastFrame());
         redraw = true;
       }
       if (motionPhase == PH_ENTER && motionPosMpx <= 0) {
         motionPhase = PH_MAIN;
         motionPosMpx = 0;
-        animJumpTo(motionCfg.mainStart);
-        lastFrameTime = now;
+        // Without an entry segment the main loop is already playing, so its
+        // frame position is kept instead of snapping back to the start.
+        if (hasEntrySeg()) {
+          animJumpTo(motionCfg.mainStart);
+          lastFrameTime = now;
+        }
         redraw = true;
       } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
         motionPhase = PH_GAP;

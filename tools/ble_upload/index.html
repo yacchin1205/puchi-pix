@@ -59,6 +59,57 @@
       border-radius: 4px;
       margin-bottom: 1em;
     }
+    #strip-scroll { overflow-x: auto; padding: 0 8px 4px 8px; }
+    #strip { display: flex; gap: 4px; }
+    /* Cell geometry: canvas 40px + 1px border each side = 42px box, plus the
+       4px flex gap -> 46px pitch. The segment bar math (CELL) relies on it. */
+    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; }
+    .thumb canvas {
+      display: block;
+      width: 40px; height: 40px;
+      border: 1px solid #ccc;
+      image-rendering: pixelated;
+      background: #000;
+    }
+    .thumb.out { opacity: 0.35; }
+    #segbar { position: relative; height: 26px; margin-top: 2px; }
+    .band {
+      position: absolute;
+      top: 3px;
+      height: 20px;
+      border-radius: 3px;
+      font-size: 11px;
+      color: #fff;
+      text-align: center;
+      line-height: 20px;
+      overflow: hidden;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .band.trim { background: #ddd; }
+    .band.entry { background: #4a90d9; }
+    .band.main { background: #3cb371; }
+    .band.exit { background: #e8963c; }
+    .handle {
+      position: absolute;
+      top: 0;
+      width: 14px;
+      height: 26px;
+      background: #fff;
+      border: 1px solid #666;
+      border-radius: 4px;
+      cursor: ew-resize;
+      touch-action: none;
+      z-index: 2;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+    }
+    .handle::after {
+      content: '';
+      position: absolute;
+      left: 5px; top: 5px;
+      width: 2px; height: 14px;
+      background: #888;
+    }
   </style>
 </head>
 <body>
@@ -67,6 +118,7 @@
   <div class="row">
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
+    <button id="revert" disabled>Revert to default</button>
     <span id="conn-status" class="pill">未接続</span>
     <span id="upload-status" class="pill">idle</span>
   </div>
@@ -85,28 +137,6 @@
       <option value="256">256色 (8bit)</option>
     </select>
     <button id="upload" disabled>Upload</button>
-    <button id="revert" disabled>Revert to default</button>
-  </div>
-
-  <div class="row" id="range-row" hidden>
-    <label><span id="range-label">フレーム範囲</span>
-      <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
-      –
-      <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
-    </label>
-    <span id="f-total" class="pill"></span>
-  </div>
-
-  <div class="row">
-    <label><input type="checkbox" id="m-on"> <span id="m-on-label">移動演出</span></label>
-    <label><span id="m-start-label">メイン開始</span>
-      <input type="number" id="m-start" min="1" max="65535" value="1" style="width: 4.5em"></label>
-    <label><span id="m-exit-label">退場開始</span>
-      <input type="number" id="m-exit" min="0" max="65535" value="0" style="width: 4.5em"></label>
-    <label><span id="m-speed-label">速度 (px/s)</span>
-      <input type="number" id="m-speed" min="1" max="255" value="60" style="width: 4.5em"></label>
-    <label><span id="m-gap-label">退場後の間 (ms)</span>
-      <input type="number" id="m-gap" min="0" max="65535" value="1000" style="width: 5.5em"></label>
   </div>
 
   <div class="panel">
@@ -117,6 +147,41 @@
     <div>
       <p id="prev-label">Quantized (1st frame preview)</p>
       <canvas id="prev" width="128" height="128"></canvas>
+    </div>
+  </div>
+
+  <!-- Hidden wire-value state: kept in sync by the filmstrip UI.
+       f-start/f-end are 1-based GIF frames; m-start/m-exit are the
+       payload-relative values sent over BLE. -->
+  <div class="row" id="range-row" hidden>
+    <label hidden><span id="range-label">フレーム範囲</span>
+      <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
+      –
+      <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
+    </label>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="m-loop" checked disabled> <span id="m-loop-label">単純ループ</span></label>
+    <label hidden><span id="m-start-label">メイン開始</span>
+      <input type="number" id="m-start" min="0" max="65535" value="1" style="width: 4.5em"></label>
+    <label hidden><span id="m-exit-label">退場開始</span>
+      <input type="number" id="m-exit" min="0" max="65535" value="0" style="width: 4.5em"></label>
+    <label id="m-speed-wrap" hidden><span id="m-speed-label">移動速度 (px/s)</span>
+      <input type="number" id="m-speed" min="1" max="255" value="60" style="width: 4.5em"></label>
+    <label id="m-gap-wrap" hidden><span id="m-gap-label">退場後の間 (ms)</span>
+      <input type="number" id="m-gap" min="0" max="65535" value="1000" style="width: 5.5em"></label>
+  </div>
+
+  <div id="strip-row" hidden>
+    <div class="row" style="gap: 6px; margin-bottom: 0.4em">
+      <label><input type="checkbox" id="e-on" checked> <span id="e-on-label">入場</span></label>
+      <label><input type="checkbox" id="x-on"> <span id="x-on-label">退場</span></label>
+      <button id="strip-reset">初期状態に戻す</button>
+    </div>
+    <div id="strip-scroll">
+      <div id="strip"></div>
+      <div id="segbar"></div>
     </div>
   </div>
 
@@ -155,7 +220,7 @@
         sizeAuto: 'Auto size', size128: '128×128 (outer 4px hidden)',
         colors16: '16 colors (4bit)', colors256: '256 colors (8bit)',
         upload: 'Upload', revert: 'Revert to default',
-        rangeLabel: 'Frame range', totalFrames: n => `${n} frames total`,
+        rangeLabel: 'Frame range',
         origLabel: 'Original (1st frame)',
         prevLabelInitial: 'Quantized (1st frame preview)',
         prevLabel: (s, k) => `Quantized ${s}×${s}, ${k} colors (1st frame preview)`,
@@ -182,10 +247,14 @@
         logDisconnecting: 'disconnecting...',
         logRevert: 'revert to default',
         logRevertError: m => `revert error: ${m}`,
-        motionOnLabel: 'Walk in/out',
+        revertConfirm: 'Revert the device image to the built-in default? The uploaded animation will be removed.',
+        loopLabel: 'Simple loop',
         mStartLabel: 'Main start', mExitLabel: 'Exit start',
         mExitTitle: '0 = reuse the entry frames for the exit',
-        mSpeedLabel: 'Speed (px/s)', mGapLabel: 'Gap after exit (ms)',
+        mSpeedLabel: 'Walk speed (px/s)', mGapLabel: 'Gap after exit (ms)',
+        stripReset: 'Reset markers',
+        eOnLabel: 'Entry', xOnLabel: 'Exit',
+        segEntry: 'Entry', segMain: 'Main', segExit: 'Exit',
         logMotionSent: (on, s) => on ? `motion config sent (main starts at frame ${s})` : 'motion config sent (disabled)',
         logMotionError: m => `motion config error: ${m}`,
       },
@@ -197,7 +266,7 @@
         sizeAuto: 'サイズ自動', size128: '128×128 (端4pxは表示外)',
         colors16: '16色 (4bit)', colors256: '256色 (8bit)',
         upload: 'アップロード', revert: 'デフォルトに戻す',
-        rangeLabel: 'フレーム範囲', totalFrames: n => `全${n}フレーム`,
+        rangeLabel: 'フレーム範囲',
         origLabel: '元画像 (先頭フレーム)',
         prevLabelInitial: '量子化 (先頭フレームプレビュー)',
         prevLabel: (s, k) => `量子化 ${s}×${s} ${k}色 (先頭フレームプレビュー)`,
@@ -224,10 +293,14 @@
         logDisconnecting: '切断しています...',
         logRevert: 'デフォルトに戻します',
         logRevertError: m => `リバートエラー: ${m}`,
-        motionOnLabel: '移動演出',
+        revertConfirm: '本体の画像を内蔵デフォルトに戻します。アップロード済みのアニメーションは削除されます。よろしいですか?',
+        loopLabel: '単純ループ',
         mStartLabel: 'メイン開始', mExitLabel: '退場開始',
         mExitTitle: '0 = 入場フレームを退場にも使う',
-        mSpeedLabel: '速度 (px/s)', mGapLabel: '退場後の間 (ms)',
+        mSpeedLabel: '移動速度 (px/s)', mGapLabel: '退場後の間 (ms)',
+        stripReset: '初期状態に戻す',
+        eOnLabel: '入場', xOnLabel: '退場',
+        segEntry: '入場', segMain: 'メイン', segExit: '退場',
         logMotionSent: (on, s) => on ? `移動設定を送信しました (メイン開始: フレーム${s})` : '移動設定を送信しました (無効)',
         logMotionError: m => `移動設定エラー: ${m}`,
       },
@@ -269,12 +342,15 @@
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
     $('prev-label').textContent = T.prevLabelInitial;
-    $('m-on-label').textContent = T.motionOnLabel;
+    $('m-loop-label').textContent = T.loopLabel;
     $('m-start-label').textContent = T.mStartLabel;
     $('m-exit-label').textContent = T.mExitLabel;
     $('m-exit').title = T.mExitTitle;
     $('m-speed-label').textContent = T.mSpeedLabel;
     $('m-gap-label').textContent = T.mGapLabel;
+    $('strip-reset').textContent = T.stripReset;
+    $('e-on-label').textContent = T.eOnLabel;
+    $('x-on-label').textContent = T.xOnLabel;
 
     if (!navigator.bluetooth) {
       const div = document.createElement('div');
@@ -314,12 +390,14 @@
           motionChar = await service.getCharacteristic(MOTION);
           const v = await motionChar.readValue();
           if (v.byteLength >= 10 && v.getUint8(0)) {
-            $('m-on').checked = true;
-            $('m-start').value = v.getUint16(1, true);
-            $('m-exit').value = v.getUint16(3, true);
+            // Frame numbers are payload-specific and reset per loaded file,
+            // so only the scalar settings are restored here. The loop
+            // checkbox stays locked until a multi-frame file is loaded.
+            if (!$('m-loop').disabled) $('m-loop').checked = false;
             $('m-speed').value = v.getUint8(5);
             $('m-gap').value = v.getUint16(6, true);
             $('bg').value = c565ToHex(v.getUint16(8, true));
+            updateMotionVis();
           }
         } catch (_) {}
         await statusChar.startNotifications();
@@ -340,12 +418,243 @@
       }
     });
 
-    // ---- Frame range selection ----
+    // ---- Filmstrip timeline (video-trim style) ----
+    // All user-visible frame numbers are 1-based GIF frames. The hidden
+    // inputs carry the derived wire values: f-start/f-end (1-based range)
+    // and m-start/m-exit (0-based, relative to the trimmed payload).
+    // Below the thumbnails sits a segment bar with labeled colored bands
+    // (entry / main / exit, gray = trimmed) and draggable handles: trim
+    // handles at both ends plus the segment dividers. Boundary coordinate
+    // b = number of frames left of the boundary (0..n).
+    const stripState = { n: 0, rs: 1, re: 1, m: 2, x: null };
+    const CELL = 46;   // thumb box 42px (canvas 40 + 1px borders) + 4px gap
+    let segEls = null;
+
+    const syncMarkerInputs = () => {
+      const s = stripState;
+      $('f-start').value = s.rs;
+      $('f-end').value = s.re;
+      $('m-start').value = Math.max(0, s.m - s.rs);   // 0 = no entry segment
+      $('m-exit').value = s.x ? (s.x - s.rs) : 0;
+    };
+
+    const motionEnabled = () => !$('m-loop').checked;
+
+    const buildStrip = () => {
+      const strip = $('strip');
+      strip.innerHTML = '';
+      strip.style.width = (stripState.n * CELL - 4) + 'px';
+      for (let i = 1; i <= stripState.n; i++) {
+        const d = document.createElement('div');
+        d.className = 'thumb';
+        const { imageData } = lastComposed.composed[i - 1];
+        const t = document.createElement('canvas');
+        t.width = imageData.width; t.height = imageData.height;
+        t.getContext('2d').putImageData(imageData, 0, 0);
+        const c = document.createElement('canvas');
+        c.width = 40; c.height = 40;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(t, 0, 0, 40, 40);
+        const label = document.createElement('div');
+        label.textContent = i;
+        d.appendChild(c);
+        d.appendChild(label);
+        strip.appendChild(d);
+      }
+      buildSegbar();
+    };
+
+    // Persistent band/handle elements: they are moved, never recreated, so
+    // pointer capture survives for the whole drag.
+    const buildSegbar = () => {
+      const bar = $('segbar');
+      bar.innerHTML = '';
+      segEls = {};
+      for (const [key, cls, label] of [
+        ['btrimL', 'band trim', ''],
+        ['bentry', 'band entry', T.segEntry],
+        ['bmain', 'band main', T.segMain],
+        ['bexit', 'band exit', T.segExit],
+        ['btrimR', 'band trim', ''],
+      ]) {
+        const d = document.createElement('div');
+        d.className = cls;
+        d.textContent = label;
+        bar.appendChild(d);
+        segEls[key] = d;
+      }
+      for (const kind of ['trimL', 'divM', 'divX', 'trimR']) {
+        const h = document.createElement('div');
+        h.className = 'handle';
+        h.dataset.kind = kind;
+        bar.appendChild(h);
+        segEls[kind] = h;
+      }
+    };
+
+    const updateStrip = () => {
+      const { n, rs, re, m, x } = stripState;
+      [...$('strip').children].forEach((d, idx) => {
+        const i = idx + 1;
+        d.classList.toggle('out', i < rs || i > re);
+      });
+      if (!segEls) return;
+      $('segbar').style.width = (n * CELL - 4) + 'px';
+      const place = (el, a, b) => {       // frames a..b inclusive
+        if (b < a) { el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.style.left = ((a - 1) * CELL) + 'px';
+        el.style.width = ((b - a + 1) * CELL - 4) + 'px';
+      };
+      place(segEls.btrimL, 1, rs - 1);
+      place(segEls.bentry, rs, m - 1);
+      place(segEls.bmain, m, x ? x - 1 : re);
+      if (x) place(segEls.bexit, x, re); else segEls.bexit.style.display = 'none';
+      place(segEls.btrimR, re + 1, n);
+      // Handle box = 14px width + 1px borders = 16px; centering its midpoint
+      // (left + 8) on the boundary gap center (b*CELL - 2) gives -10.
+      const placeHandle = (el, b, show = true) => {
+        el.style.display = show ? '' : 'none';
+        el.style.left = (b * CELL - 10) + 'px';
+      };
+      placeHandle(segEls.trimL, rs - 1);
+      placeHandle(segEls.divM, m - 1, m > rs);
+      placeHandle(segEls.divX, x ? x - 1 : 0, !!x);
+      placeHandle(segEls.trimR, re);
+      $('x-on').checked = !!x;   // reflect drag-off-the-end removal too
+    };
+
+    // Clamp chain shared by every mutation. m == rs means no entry segment
+    // (wire mainStart 0); with entry enabled it needs >= 1 frame. Main must
+    // fit the range, and an exit that no longer fits disappears (= reuse
+    // entry frames / main).
+    const normalizeMarkers = () => {
+      const s = stripState;
+      if ($('e-on').checked && s.re > s.rs) {
+        s.m = Math.min(Math.max(s.m, s.rs + 1), s.re);
+      } else {
+        s.m = s.rs;
+        $('e-on').checked = false;
+      }
+      if (s.x && (s.x <= s.m || s.x > s.re)) s.x = null;
+      syncMarkerInputs();
+      updateStrip();
+    };
+
+    let dragKind = null;
+    let dragRangeBefore = null;
+    const applyBoundary = (kind, b) => {
+      const s = stripState;
+      switch (kind) {
+        case 'trimL': s.rs = Math.min(b + 1, s.re); break;
+        case 'trimR': s.re = Math.max(b, s.rs); break;
+        case 'divM':  s.m = b + 1; break;
+        case 'divX':
+          if (b >= s.re) s.x = null;     // dragged off the end -> no exit
+          else s.x = b + 1;
+          break;
+      }
+      normalizeMarkers();
+    };
+    $('segbar').addEventListener('pointerdown', (e) => {
+      const kind = e.target.dataset && e.target.dataset.kind;
+      if (!kind) return;
+      dragKind = kind;
+      dragRangeBefore = `${stripState.rs},${stripState.re}`;
+      e.target.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    $('segbar').addEventListener('pointermove', (e) => {
+      if (!dragKind) return;
+      const rect = $('segbar').getBoundingClientRect();
+      const b = Math.max(0, Math.min(stripState.n,
+        Math.round((e.clientX - rect.left) / CELL)));
+      applyBoundary(dragKind, b);
+    });
+    const endDrag = () => {
+      if (!dragKind) return;
+      dragKind = null;
+      if (`${stripState.rs},${stripState.re}` !== dragRangeBefore) rebuild();
+    };
+    $('segbar').addEventListener('pointerup', endDrag);
+    $('segbar').addEventListener('pointercancel', endDrag);
+
+    $('e-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('e-on').checked) {
+        if (s.re <= s.rs) {              // no room for entry + main
+          $('e-on').checked = false;
+          return;
+        }
+        s.m = s.rs + 1;
+      } else {
+        s.m = s.rs;
+      }
+      normalizeMarkers();
+    });
+
+    $('x-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('x-on').checked) {
+        if (s.re <= s.m) {               // main would become empty
+          $('x-on').checked = false;
+          return;
+        }
+        s.x = s.re;                      // start with the last frame as exit
+      } else {
+        s.x = null;
+      }
+      normalizeMarkers();
+    });
+
+    $('strip-reset').addEventListener('click', () => {
+      const s = stripState;
+      const rangeBefore = `${s.rs},${s.re}`;
+      s.rs = 1;
+      s.re = s.n;
+      s.m = Math.min(2, s.n);
+      s.x = null;
+      $('e-on').checked = true;
+      normalizeMarkers();
+      if (`${s.rs},${s.re}` !== rangeBefore) rebuild();
+    });
+
+    // Simple loop (default) hides the filmstrip and every motion-specific
+    // setting; unchecking it reveals them. Returning to simple loop resets
+    // the range to all frames so no invisible trim stays applied.
+    const updateMotionVis = () => {
+      const on = motionEnabled();
+      $('strip-row').hidden = !on || stripState.n <= 1;
+      $('m-speed-wrap').hidden = !on;
+      $('m-gap-wrap').hidden = !on;
+      if (!on && stripState.n > 1 &&
+          (stripState.rs !== 1 || stripState.re !== stripState.n)) {
+        stripState.rs = 1;
+        stripState.re = stripState.n;
+        syncMarkerInputs();
+        rebuild();
+      }
+      updateStrip();
+    };
+    $('m-loop').addEventListener('change', updateMotionVis);
+    updateMotionVis();
+
     const resetFrameRange = (n) => {
-      $('range-row').hidden = (n <= 1);
-      $('f-start').max = n; $('f-start').value = 1;
-      $('f-end').max = n;   $('f-end').value = n;
-      $('f-total').textContent = T.totalFrames(n);
+      // Motion needs at least 2 frames; until a usable file is loaded the
+      // simple-loop checkbox stays locked in its default state.
+      $('m-loop').disabled = (n <= 1);
+      if (n <= 1) $('m-loop').checked = true;
+      $('f-start').max = n;
+      $('f-end').max = n;
+      stripState.n = n;
+      stripState.rs = 1;
+      stripState.re = n;
+      stripState.m = Math.min(2, n);
+      stripState.x = null;
+      $('e-on').checked = true;
+      syncMarkerInputs();
+      updateMotionVis();
     };
 
     // Read the selected range as [start, end] (1-based, inclusive), clamped
@@ -367,6 +676,8 @@
       try {
         lastComposed = await fileToComposed(lastFile);
         if (resetRange) resetFrameRange(lastComposed.composed.length);
+        buildStrip();     // thumbnails follow bg-color recomposition too
+        updateStrip();
         payload = buildPayload(lastComposed);
         log(T.logBuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
         if (server && server.connected) $('upload').disabled = false;
@@ -451,8 +762,8 @@
     };
 
     const sendMotion = async () => {
-      const on = $('m-on').checked ? 1 : 0;
-      const start = Math.min(Math.max($('m-start').value | 0, 1), 65535);
+      const on = motionEnabled() ? 1 : 0;
+      const start = Math.min(Math.max($('m-start').value | 0, 0), 65535);
       const exit = Math.min(Math.max($('m-exit').value | 0, 0), 65535);
       const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
       const gap = Math.min(Math.max($('m-gap').value | 0, 0), 65535);
@@ -488,6 +799,7 @@
     // ---- Revert ----
     $('revert').addEventListener('click', async () => {
       if (!commitChar) return;
+      if (!window.confirm(T.revertConfirm)) return;
       log(T.logRevert);
       try {
         await commitChar.writeValueWithResponse(new Uint8Array([0x03]));
