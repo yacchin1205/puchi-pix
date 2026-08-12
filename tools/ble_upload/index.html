@@ -59,6 +59,7 @@
       border-radius: 4px;
       margin-bottom: 1em;
     }
+    #pv { border-radius: 50%; }
     #strip-scroll { overflow-x: auto; padding: 0 8px 4px 8px; }
     #strip { display: flex; gap: 4px; }
     /* Cell geometry: canvas 40px + 1px border each side = 42px box, plus the
@@ -111,6 +112,8 @@
       width: 2px; height: 14px;
       background: #888;
     }
+    .thumb.playing canvas { border-color: #e33; box-shadow: 0 0 0 2px #e33; }
+    .band.playing { outline: 2px solid #222; outline-offset: 1px; }
   </style>
 </head>
 <body>
@@ -149,6 +152,10 @@
       <p id="prev-label">Quantized (1st frame preview)</p>
       <canvas id="prev" width="128" height="128"></canvas>
     </div>
+    <div>
+      <p id="pv-label">プレビュー</p>
+      <canvas id="pv" width="240" height="240"></canvas>
+    </div>
   </div>
 
   <!-- Hidden range state (1-based GIF frames), kept in sync by the
@@ -176,6 +183,7 @@
       <label><input type="checkbox" id="to-on"> <span id="to-on-label">中割(後)</span></label>
       <label><input type="checkbox" id="x-on"> <span id="x-on-label">退場</span></label>
       <button id="strip-reset">初期状態に戻す</button>
+      <button id="pv-play">再生</button>
     </div>
     <div id="strip-scroll">
       <div id="strip"></div>
@@ -249,6 +257,7 @@
         loopLabel: 'Simple loop',
         mSpeedLabel: 'Walk speed (px/s)', mGapLabel: 'Gap after exit (ms)',
         stripReset: 'Reset markers',
+        pvLabel: 'Preview', pvPlay: 'Play', pvStop: 'Stop',
         eOnLabel: 'Entry', xOnLabel: 'Exit',
         tiOnLabel: 'Intro', toOnLabel: 'Outro',
         segTIn: 'Intro', segTOut: 'Outro',
@@ -295,6 +304,7 @@
         loopLabel: '単純ループ',
         mSpeedLabel: '移動速度 (px/s)', mGapLabel: '退場後の間 (ms)',
         stripReset: '初期状態に戻す',
+        pvLabel: 'プレビュー', pvPlay: '再生', pvStop: '停止',
         eOnLabel: '入場', xOnLabel: '退場',
         tiOnLabel: '中割(前)', toOnLabel: '中割(後)',
         segTIn: '中割', segTOut: '中割',
@@ -340,6 +350,8 @@
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
     $('prev-label').textContent = T.prevLabelInitial;
+    $('pv-label').textContent = T.pvLabel;
+    $('pv-play').textContent = T.pvPlay;
     $('m-loop-label').textContent = T.loopLabel;
     $('m-speed-label').textContent = T.mSpeedLabel;
     $('m-gap-label').textContent = T.mGapLabel;
@@ -430,6 +442,7 @@
     const stripState = { n: 0, rs: 1, re: 1, m: 2, l: 2, o: null, x: null };
     const CELL = 46;   // thumb box 42px (canvas 40 + 1px borders) + 4px gap
     let segEls = null;
+    let pvFrames = [];   // full-size composed frame canvases, for the preview
 
     const syncMarkerInputs = () => {
       const s = stripState;
@@ -443,6 +456,7 @@
       const strip = $('strip');
       strip.innerHTML = '';
       strip.style.width = (stripState.n * CELL - 4) + 'px';
+      pvFrames = [];
       for (let i = 1; i <= stripState.n; i++) {
         const d = document.createElement('div');
         d.className = 'thumb';
@@ -450,6 +464,7 @@
         const t = document.createElement('canvas');
         t.width = imageData.width; t.height = imageData.height;
         t.getContext('2d').putImageData(imageData, 0, 0);
+        pvFrames[i - 1] = t;
         const c = document.createElement('canvas');
         c.width = 40; c.height = 40;
         const ctx = c.getContext('2d');
@@ -660,11 +675,17 @@
     $('x-on').addEventListener('change', () => {
       const s = stripState;
       if ($('x-on').checked) {
-        if (s.re <= s.l || (s.o && s.o >= s.re)) {  // no room after loop/outro
+        if (s.re <= s.l) {               // no room after the loop at all
           $('x-on').checked = false;
           return;
         }
-        s.x = s.re;                      // start with the last frame as exit
+        // Default to a 1-frame exit at the end. An outro sitting on the last
+        // frame steps back one to make room (dropped when that leaves it
+        // without room of its own).
+        if (s.o && s.o >= s.re) {
+          s.o = (s.re - 1 > s.l) ? s.re - 1 : null;
+        }
+        s.x = s.re;
       } else {
         s.x = null;
       }
@@ -692,6 +713,7 @@
       $('strip-row').hidden = !on || stripState.n <= 1;
       $('m-speed-wrap').hidden = !on;
       $('m-gap-wrap').hidden = !on;
+      if (!on) pvStop();   // play/stop lives on the (now hidden) timeline
       if (!on && stripState.n > 1 &&
           (stripState.rs !== 1 || stripState.re !== stripState.n)) {
         stripState.rs = 1;
@@ -701,10 +723,12 @@
       }
       updateStrip();
     };
+    // (no eager call: the HTML defaults already match simple-loop mode, and
+    // pvStop below is not yet initialized during module evaluation)
     $('m-loop').addEventListener('change', updateMotionVis);
-    updateMotionVis();
 
     const resetFrameRange = (n) => {
+      pvStop();
       // Motion needs at least 2 frames; until a usable file is loaded the
       // simple-loop checkbox stays locked in its default state.
       $('m-loop').disabled = (n <= 1);
@@ -721,6 +745,217 @@
       syncMarkerInputs();
       updateMotionVis();
     };
+
+    // ---- Timeline preview ----
+    // Plays the segment sequence the firmware would run (entry walk-in ->
+    // intro once -> main loop -> outro once -> exit walk-out -> gap), while
+    // highlighting the current frame and its segment band on the timeline.
+    // The main loop runs 2 passes standing in for "while handled". The round
+    // canvas mirrors the device: 240px disc, bg fill, 2x sprite scale.
+    const pvState = {
+      running: false, phase: 'gap', frame: 1, frameDue: 0,
+      pos: 0, gapUntil: 0, passes: 0, last: 0, raf: 0,
+    };
+
+    const pvDur = (f) => {
+      let d = lastComposed.composed[f - 1].delay | 0;
+      if (d < 20) d = 100;
+      if (d > 65535) d = 65535;
+      return d;
+    };
+
+    const pvSegs = () => {
+      const s = stripState;
+      const loopLast = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+      const loop = [s.l, loopLast];
+      const entry = s.m > s.rs ? [s.rs, s.m - 1] : null;
+      return {
+        loop,
+        enter: entry || loop,
+        intro: s.l > s.m ? [s.m, s.l - 1] : null,
+        outro: s.o ? [s.o, s.x ? s.x - 1 : s.re] : null,
+        exit: s.x ? [s.x, s.re] : (entry || loop),
+      };
+    };
+
+    const pvSpriteSize = () => {
+      const sel = $('size').value;
+      const { W, H } = lastComposed;
+      return (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
+    };
+
+    const pvHighlight = (f) => {
+      [...$('strip').children].forEach((d, idx) =>
+        d.classList.toggle('playing', f === idx + 1));
+      if (!segEls) return;
+      const s = stripState;
+      let key = null;
+      if (f !== null && f >= s.rs && f <= s.re) {
+        if (f < s.m) key = 'bentry';
+        else if (f < s.l) key = 'btin';
+        else if (s.x && f >= s.x) key = 'bexit';
+        else if (s.o && f >= s.o) key = 'btout';
+        else key = 'bmain';
+      }
+      for (const k of ['bentry', 'btin', 'bmain', 'btout', 'bexit']) {
+        segEls[k].classList.toggle('playing', k === key);
+      }
+    };
+
+    const pvDraw = () => {
+      const ctx = $('pv').getContext('2d');
+      ctx.fillStyle = $('bg').value;
+      ctx.fillRect(0, 0, 240, 240);
+      if (pvState.phase === 'gap') {
+        pvHighlight(null);
+        return;
+      }
+      const f = Math.min(Math.max(pvState.frame, 1), stripState.n);
+      const spr = pvSpriteSize() * 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(120, 120, 120, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(pvFrames[f - 1],
+        Math.round(120 - spr / 2 + pvState.pos * 2), 120 - spr / 2, spr, spr);
+      ctx.restore();
+      pvHighlight(f);
+    };
+
+    const pvTick = (now) => {
+      if (!pvState.running) return;
+      const p = pvState;
+      const s = stripState;
+      const dt = Math.min(now - p.last, 100);
+      p.last = now;
+      const speed = Math.max($('m-speed').value | 0, 1);
+      const gap = Math.max($('m-gap').value | 0, 0);
+      const maxShift = (120 + pvSpriteSize() * 3 / 2) / 2 + 1;
+
+      if (!motionEnabled()) {
+        p.phase = 'main';
+        p.pos = 0;
+        if (now >= p.frameDue) {
+          p.frame = (p.frame >= s.re) ? s.rs : p.frame + 1;
+          p.frameDue = now + pvDur(p.frame);
+        }
+      } else {
+        const seg = pvSegs();
+        switch (p.phase) {
+          case 'gap':
+            if (now >= p.gapUntil) {
+              p.phase = 'enter';
+              p.pos = maxShift;
+              p.frame = seg.enter[0];
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'enter':
+            p.pos -= speed * dt / 1000;
+            if (now >= p.frameDue) {
+              p.frame = (p.frame >= seg.enter[1]) ? seg.enter[0] : p.frame + 1;
+              p.frameDue = now + pvDur(p.frame);
+            }
+            if (p.pos <= 0) {
+              p.pos = 0;
+              p.passes = 0;
+              if (s.m > s.rs) {
+                p.phase = seg.intro ? 'tin' : 'main';
+                p.frame = seg.intro ? seg.intro[0] : seg.loop[0];
+                p.frameDue = now + pvDur(p.frame);
+              } else {
+                p.phase = 'main';   // already playing the loop frames
+              }
+            }
+            break;
+          case 'tin':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.intro[1]) {
+                p.phase = 'main';
+                p.frame = seg.loop[0];
+                p.passes = 0;
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'main':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.loop[1]) {
+                p.passes++;
+                if (p.passes < 2) {
+                  p.frame = seg.loop[0];
+                } else if (seg.outro) {
+                  p.phase = 'tout';
+                  p.frame = seg.outro[0];
+                } else {
+                  p.phase = 'exit';
+                  p.pos = 0;
+                  p.frame = seg.exit[0];
+                }
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'tout':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.outro[1]) {
+                p.phase = 'exit';
+                p.pos = 0;
+                p.frame = seg.exit[0];
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'exit':
+            p.pos -= speed * dt / 1000;
+            if (now >= p.frameDue) {
+              p.frame = (p.frame >= seg.exit[1]) ? seg.exit[0] : p.frame + 1;
+              p.frameDue = now + pvDur(p.frame);
+            }
+            if (p.pos <= -maxShift) {
+              p.phase = 'gap';
+              p.gapUntil = now + gap;
+            }
+            break;
+        }
+      }
+      pvDraw();
+      p.raf = requestAnimationFrame(pvTick);
+    };
+
+    const pvStart = () => {
+      if (!lastComposed) return;
+      pvState.running = true;
+      pvState.phase = 'gap';
+      pvState.gapUntil = 0;
+      pvState.pos = 0;
+      pvState.frame = stripState.rs;
+      pvState.frameDue = 0;
+      pvState.passes = 0;
+      pvState.last = performance.now();
+      $('pv-play').textContent = T.pvStop;
+      pvState.raf = requestAnimationFrame(pvTick);
+    };
+
+    const pvStop = () => {
+      if (pvState.raf) cancelAnimationFrame(pvState.raf);
+      pvState.running = false;
+      pvState.phase = 'gap';
+      $('pv-play').textContent = T.pvPlay;
+      pvHighlight(null);
+    };
+
+    $('pv-play').addEventListener('click', () => {
+      if (pvState.running) pvStop();
+      else pvStart();
+    });
 
     // Read the selected range as [start, end] (1-based, inclusive), clamped
     // to [1, n] and normalized so start <= end; writes clamps back to the UI.
