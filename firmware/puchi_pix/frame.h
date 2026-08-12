@@ -22,4 +22,7 @@ typedef struct {
   int8_t refDy;
 } OvlDesc;
 
+// Sentinel for absent frame roles (FRAME_INTRO_START / FRAME_OUTRO_START)
+static constexpr uint8_t FRAME_NONE = 0xFF;
+
 #endif

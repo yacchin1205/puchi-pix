@@ -7,13 +7,21 @@ Each frame is either a full frame or an overlay on a reference frame.
 The .ino decides which frame to start at, where to loop, etc.
 
 Run: python3 resources/generate_image_data.py <gif_path> <config> [gamma] [sat_power] \
-       --walk-seq <i,i,...> --greet-start <i>
+       --walk-seq <i,i,...> --main-start <i> [--intro-start <i>] [--outro-start <i>]
 
---walk-seq (required): output frame indices the walk cycle steps through.
---greet-start (required): output frame index where the greet chain begins;
-  the chain follows next pointers and ends when next == WALK_SEQ[0].
-Both are emitted into the header (WALK_SEQ / FRAME_GREET_START) so the icon
-carries its own frame roles; indices are validated against the frame count.
+--walk-seq (optional): output frame indices the walk cycle steps through.
+  Omit for a plain loop icon (no walk presentation, HAS_WALK 0): frames just
+  follow their next chain, and dim/sleep run on the activity timers.
+--main-start (required with --walk-seq): first frame of the main loop; its
+  next chain must cycle back to main-start. The loop repeats while handling
+  is detected.
+--intro-start (optional): one-shot chain played after walking in; its next
+  chain must reach main-start.
+--outro-start (optional): one-shot chain played before walking out; the
+  chain ends when next == WALK_SEQ[0].
+Roles are emitted into the header (HAS_WALK, WALK_SEQ / FRAME_INTRO_START /
+FRAME_MAIN_START / FRAME_OUTRO_START, FRAME_NONE = absent) so the icon
+carries its own frame roles; chains are validated against the config.
 
 gamma (optional, default 1.0): applied to the output palette only.
   OLED panels drive pixels near-linearly, so sRGB artwork looks washed out;
@@ -24,13 +32,21 @@ sat_power (optional, default 1.0): HSV saturation curve S' = S^p, palette only.
   more than already-saturated ones. 0.5-0.7 is a good range. Applied before gamma.
 
 Config is a comma-separated list of frame specs:
-  <gif_frame>:<next>[:<ref>[:<duration_ms>[:<dy>]]]
+  <gif_frame>:<next>[:<ref>[:<duration_ms>[:<dy>[:<split>]]]]
 
   ref: reference frame index for overlay (omit or empty for full frame).
        May point to another overlay frame; the firmware walks the chain.
   duration_ms: display duration in ms (default: 150)
   dy: vertical shift applied to ref content (default: 0). Rows shifted in
       from outside the image render as palette index 0 (background).
+  split: 1 = store the diff as two rects (best horizontal cut) instead of
+      one bounding box. The second rect is emitted as a hidden helper frame
+      appended after the visible frames; the firmware just walks the
+      overlay chain, so no firmware support is needed. Errors out when no
+      cut is smaller than the single bounding box.
+
+--crop <x>:<w> (optional): crop all frames to columns [x, x+w) after
+  background removal. Errors out if any frame has content outside the crop.
 
 Example (blink loop):
   0::2000:1,1:2:0:150,2:3:0:150,3:0:0:150
@@ -224,8 +240,46 @@ def parse_config(config_str):
         ref_idx = int(parts[2]) if len(parts) > 2 and parts[2] != '' else None
         duration = int(parts[3]) if len(parts) > 3 and parts[3] != '' else 150
         dy = int(parts[4]) if len(parts) > 4 and parts[4] != '' else 0
-        frame_specs.append({'gif': gif_idx, 'next': next_idx, 'ref': ref_idx, 'duration': duration, 'dy': dy})
+        split = len(parts) > 5 and parts[5] == '1'
+        frame_specs.append({'gif': gif_idx, 'next': next_idx, 'ref': ref_idx,
+                            'duration': duration, 'dy': dy, 'split': split})
     return frame_specs
+
+
+def split_diff_regions(base, frame):
+    """Best two-rect cover of the diff: try every horizontal and vertical
+    cut, keep the pair with the smallest total area. Returns None when no
+    cut beats the single bounding box."""
+    diff = np.any(base != frame, axis=2)
+    ys, xs = np.where(diff)
+    if len(ys) == 0:
+        return None
+
+    def rect(sub_mask, x_off, y_off):
+        yy, xx = np.where(sub_mask)
+        if len(yy) == 0:
+            return None
+        return (int(xx.min()) + x_off, int(yy.min()) + y_off,
+                int(xx.max() - xx.min() + 1), int(yy.max() - yy.min() + 1))
+
+    def area(r):
+        return r[2] * r[3]
+
+    best = None
+    best_area = area(rect(diff, 0, 0))
+    for cut in range(int(ys.min()) + 1, int(ys.max()) + 1):
+        r1 = rect(diff[:cut], 0, 0)
+        r2 = rect(diff[cut:], 0, cut)
+        if r1 and r2 and area(r1) + area(r2) < best_area:
+            best_area = area(r1) + area(r2)
+            best = (r1, r2)
+    for cut in range(int(xs.min()) + 1, int(xs.max()) + 1):
+        r1 = rect(diff[:, :cut], 0, 0)
+        r2 = rect(diff[:, cut:], cut, 0)
+        if r1 and r2 and area(r1) + area(r2) < best_area:
+            best_area = area(r1) + area(r2)
+            best = (r1, r2)
+    return best
 
 
 def shift_rows(img, dy, fill):
@@ -241,27 +295,86 @@ def shift_rows(img, dy, fill):
     return out
 
 
+def validate_roles(frame_specs, n_frames, walk_seq, intro_start, main_start, outro_start):
+    roles = walk_seq + [main_start] + [v for v in (intro_start, outro_start) if v is not None]
+    bad_roles = [i for i in roles if not 0 <= i < n_frames]
+    if bad_roles:
+        print(f"Error: frame role indices {bad_roles} out of range (frame count {n_frames})")
+        sys.exit(1)
+
+    def follow_next(idx):
+        return frame_specs[idx]['next']
+
+    f = follow_next(main_start)
+    steps = 1
+    while f != main_start:
+        f = follow_next(f)
+        steps += 1
+        if steps > n_frames:
+            print(f"Error: main chain from {main_start} does not cycle back to it")
+            sys.exit(1)
+    if intro_start is not None:
+        if intro_start == main_start:
+            print("Error: intro-start must differ from main-start")
+            sys.exit(1)
+        f = intro_start
+        steps = 0
+        while f != main_start:
+            f = follow_next(f)
+            steps += 1
+            if steps > n_frames:
+                print(f"Error: intro chain from {intro_start} never reaches main-start {main_start}")
+                sys.exit(1)
+    if outro_start is not None:
+        f = outro_start
+        steps = 0
+        while follow_next(f) != walk_seq[0]:
+            f = follow_next(f)
+            steps += 1
+            if steps > n_frames:
+                print(f"Error: outro chain from {outro_start} never returns to WALK_SEQ[0] ({walk_seq[0]})")
+                sys.exit(1)
+
+
 def main():
     args = sys.argv[1:]
     walk_seq = None
-    greet_start = None
+    intro_start = None
+    main_start = None
+    outro_start = None
+    crop = None
     positional = []
     i = 0
     while i < len(args):
         if args[i] == '--walk-seq':
             walk_seq = [int(v) for v in args[i + 1].split(',')]
             i += 2
-        elif args[i] == '--greet-start':
-            greet_start = int(args[i + 1])
+        elif args[i] == '--intro-start':
+            intro_start = int(args[i + 1])
+            i += 2
+        elif args[i] == '--main-start':
+            main_start = int(args[i + 1])
+            i += 2
+        elif args[i] == '--outro-start':
+            outro_start = int(args[i + 1])
+            i += 2
+        elif args[i] == '--crop':
+            crop = tuple(int(v) for v in args[i + 1].split(':'))
             i += 2
         else:
             positional.append(args[i])
             i += 1
 
-    if len(positional) < 2 or walk_seq is None or greet_start is None:
-        print(f"Usage: {sys.argv[0]} <gif_path> <config> [gamma] [sat_power] --walk-seq <i,i,...> --greet-start <i>")
+    if len(positional) < 2:
+        print(f"Usage: {sys.argv[0]} <gif_path> <config> [gamma] [sat_power] [--walk-seq <i,i,...> --main-start <i> [--intro-start <i>] [--outro-start <i>]]")
         print(f"  config: comma-separated frame specs: gif_frame:next[:ref[:duration_ms[:dy]]]")
-        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:0:0:150 --walk-seq 0 --greet-start 1")
+        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:1:0:150 --walk-seq 0 --main-start 1")
+        sys.exit(1)
+    if walk_seq is None and (main_start is not None or intro_start is not None or outro_start is not None):
+        print("Error: --main-start/--intro-start/--outro-start require --walk-seq")
+        sys.exit(1)
+    if walk_seq is not None and main_start is None:
+        print("Error: --walk-seq requires --main-start")
         sys.exit(1)
 
     gif_path = positional[0]
@@ -283,10 +396,8 @@ def main():
     n_frames = len(frame_specs)
     print(f"Output frames: {n_frames}")
 
-    bad_roles = [i for i in walk_seq + [greet_start] if not 0 <= i < n_frames]
-    if bad_roles:
-        print(f"Error: frame role indices {bad_roles} out of range (frame count {n_frames})")
-        sys.exit(1)
+    if walk_seq is not None:
+        validate_roles(frame_specs, n_frames, walk_seq, intro_start, main_start, outro_start)
 
     # Determine base frame for background detection (first full frame)
     base_gif_idx = None
@@ -299,6 +410,16 @@ def main():
 
     # Replace background
     gif_frames = replace_background(gif_frames, base_gif_idx)
+
+    if crop is not None:
+        cx, cw = crop
+        for i, frm in enumerate(gif_frames):
+            outside = np.concatenate([frm[:, :cx], frm[:, cx + cw:]], axis=1)
+            if np.any(outside != 0):
+                print(f"Error: gif frame {i} has content outside crop x={cx}..{cx + cw}")
+                sys.exit(1)
+        gif_frames = [frm[:, cx:cx + cw] for frm in gif_frames]
+        print(f"Cropped to x={cx}..{cx + cw}")
 
     img_h, img_w = gif_frames[0].shape[:2]
     print(f"Image size: {img_w}x{img_h}")
@@ -324,6 +445,32 @@ def main():
             print(f"  Frame {i}: full")
         frame_info.append({'type': ftype, 'region': region, 'spec': spec})
 
+    # Split frames: replace the single diff rect with the best two-rect
+    # cover. The second rect becomes a hidden helper frame appended after
+    # the visible frames; the ref dy moves onto the helper (the last hop),
+    # so the shift is applied exactly once when the chain falls through.
+    synthetics = []
+    for i, info in enumerate(frame_info):
+        if not info['spec']['split']:
+            continue
+        if info['type'] != 'overlay':
+            print(f"Error: frame {i} requests split but is not an overlay")
+            sys.exit(1)
+        src = gif_frames[info['spec']['gif']]
+        ref_src = shift_rows(gif_frames[frame_specs[info['spec']['ref']]['gif']], info['spec']['dy'], 0)
+        rects = split_diff_regions(ref_src, src)
+        if rects is None:
+            print(f"Error: frame {i} requests split but no cut beats the single rect")
+            sys.exit(1)
+        r1, r2 = rects
+        info['region'] = r1
+        info['syn_ref'] = n_frames + len(synthetics)
+        synthetics.append({'gif': info['spec']['gif'], 'ref': info['spec']['ref'],
+                           'dy': info['spec']['dy'], 'region': r2})
+        print(f"  Frame {i}: split into {r1[2]}x{r1[3]} at ({r1[0]},{r1[1]})"
+              f" + helper f{info['syn_ref']} {r2[2]}x{r2[3]} at ({r2[0]},{r2[1]})")
+    total_frames = n_frames + len(synthetics)
+
     # Build combined image for palette quantization
     parts = []
     part_map = []
@@ -340,6 +487,14 @@ def main():
             padded[:, :w] = region
             parts.append(padded)
             part_map.append(('overlay', i, h, w))
+    for k, syn in enumerate(synthetics):
+        src = gif_frames[syn['gif']]
+        x, y, w, h = syn['region']
+        region = src[y:y+h, x:x+w]
+        padded = np.zeros((h, img_w, 3), dtype=region.dtype)
+        padded[:, :w] = region
+        parts.append(padded)
+        part_map.append(('overlay', n_frames + k, h, w))
 
     combined = np.vstack(parts)
     palette_565, palette_rgb, combined_indexed = quantize_to_palette(combined, PALETTE_SIZE)
@@ -374,11 +529,27 @@ def main():
     for idx, data in indexed_data.items():
         packed[idx] = pack_4bit(data)
 
+    # Unified accessors over visible frames and split helpers
+    def emit_type(i):
+        return frame_info[i]['type'] if i < n_frames else 'overlay'
+
+    def emit_region(i):
+        return frame_info[i]['region'] if i < n_frames else synthetics[i - n_frames]['region']
+
+    def emit_ref_dy(i):
+        if i < n_frames:
+            info = frame_info[i]
+            if 'syn_ref' in info:
+                return info['syn_ref'], 0
+            return info['spec']['ref'], info['spec']['dy']
+        syn = synthetics[i - n_frames]
+        return syn['ref'], syn['dy']
+
     # Dedupe identical frame data (e.g. the same gif frame appearing twice in a sequence)
     data_owner = {}   # output frame idx -> idx whose array holds the data
     seen = {}
-    for i in range(n_frames):
-        key = (bytes(packed[i]), frame_info[i]['type'], frame_info[i]['region'])
+    for i in range(total_frames):
+        key = (bytes(packed[i]), emit_type(i), emit_region(i))
         if key in seen:
             data_owner[i] = seen[key]
             print(f"  Frame {i}: identical to frame {seen[key]}, sharing data array")
@@ -391,12 +562,21 @@ def main():
         f.write(f'// Auto-generated image data: {output_name}\n')
         f.write(f'// Source: {os.path.basename(gif_path)}\n')
         f.write(f'// Config: {config_str}\n')
+        role_args = ''
+        if crop is not None:
+            role_args += f' --crop {crop[0]}:{crop[1]}'
+        if walk_seq is not None:
+            role_args = f' --walk-seq {",".join(map(str, walk_seq))} --main-start {main_start}'
+            if intro_start is not None:
+                role_args += f' --intro-start {intro_start}'
+            if outro_start is not None:
+                role_args += f' --outro-start {outro_start}'
         f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}" {gamma} {sat_power}'
-                f' --walk-seq {",".join(map(str, walk_seq))} --greet-start {greet_start}\n\n')
+                f'{role_args}\n\n')
 
         f.write(f'#define IMG_W {img_w}\n')
         f.write(f'#define IMG_H {img_h}\n')
-        f.write(f'#define FRAME_COUNT {n_frames}\n')
+        f.write(f'#define FRAME_COUNT {total_frames}\n')
         f.write(f'#define PALETTE_SIZE {PALETTE_SIZE}\n\n')
         f.write('#include "frame.h"\n\n')
 
@@ -404,38 +584,56 @@ def main():
         write_c_array(f, 'uint16_t', 'palette', palette_565, per_line=8)
 
         # Frame data arrays
-        for i in range(n_frames):
+        for i in range(total_frames):
             if data_owner[i] == i:
                 write_c_array(f, 'uint8_t', f'frame_data_{i}', packed[i])
 
         f.write(f'static const Frame frames[FRAME_COUNT] PROGMEM = {{\n')
-        for i, info in enumerate(frame_info):
-            ftype = 0 if info['type'] == 'full' else 1
-            next_idx = info['spec']['next']
-            ref_idx = info['spec']['ref'] if info['spec']['ref'] is not None else 0
-            if info['region']:
-                rx, ry, rw, rh = info['region']
+        for i in range(total_frames):
+            ftype = 0 if emit_type(i) == 'full' else 1
+            if i < n_frames:
+                next_idx = frame_info[i]['spec']['next']
+                duration = frame_info[i]['spec']['duration']
             else:
-                rx, ry, rw, rh = 0, 0, 0, 0
-            duration = info['spec']['duration']
-            dy = info['spec']['dy'] if ftype else 0
+                next_idx = 0
+                duration = 0
+            ref_idx, dy = emit_ref_dy(i) if ftype else (0, 0)
+            if ref_idx is None:
+                ref_idx = 0
+            region = emit_region(i)
+            rx, ry, rw, rh = region if region else (0, 0, 0, 0)
             f.write(f'  {{ {ftype}, {next_idx}, {ref_idx}, {rx}, {ry}, {rw}, {rh}, {dy}, {duration}, frame_data_{data_owner[i]} }},')
-            f.write(f'  // f{i}: {"overlay on "+str(ref_idx) if ftype else "full"}')
+            if i >= n_frames:
+                f.write(f'  // f{i}: split helper, overlay on {ref_idx}')
+            else:
+                f.write(f'  // f{i}: {"overlay on "+str(ref_idx) if ftype else "full"}')
             if dy:
                 f.write(f' dy={dy}')
-            f.write(f' {duration}ms -> f{next_idx}\n')
+            if i < n_frames:
+                f.write(f' {duration}ms -> f{next_idx}')
+            f.write('\n')
         f.write('};\n')
 
-        f.write('\n// Frame roles consumed by the walk animation in puchi_pix.ino\n')
-        f.write(f'static constexpr uint8_t WALK_SEQ[] = {{{", ".join(map(str, walk_seq))}}};\n')
-        f.write(f'static constexpr uint8_t FRAME_GREET_START = {greet_start};\n')
+        if walk_seq is not None:
+            f.write('\n// Frame roles consumed by the walk animation in puchi_pix.ino\n')
+            f.write('#define HAS_WALK 1\n')
+            f.write(f'static constexpr uint8_t WALK_SEQ[] = {{{", ".join(map(str, walk_seq))}}};\n')
+            def role(v):
+                return str(v) if v is not None else 'FRAME_NONE'
+            f.write(f'static constexpr uint8_t FRAME_INTRO_START = {role(intro_start)};\n')
+            f.write(f'static constexpr uint8_t FRAME_MAIN_START = {main_start};\n')
+            f.write(f'static constexpr uint8_t FRAME_OUTRO_START = {role(outro_start)};\n')
+        else:
+            f.write('\n// Plain loop icon: frames follow their next chain, no walk presentation\n')
+            f.write('#define HAS_WALK 0\n')
 
     # Summary
-    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames) if data_owner[i] == i) + n_frames * 16
+    total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(total_frames) if data_owner[i] == i) + total_frames * 16
     print(f"\nGenerated: {output_file}")
-    for i in range(n_frames):
+    for i in range(total_frames):
         shared = '' if data_owner[i] == i else f" (shared with frame {data_owner[i]})"
-        print(f"  Frame {i} ({frame_info[i]['type']}): {len(packed[i])} bytes{shared}")
+        kind = emit_type(i) if i < n_frames else 'split helper'
+        print(f"  Frame {i} ({kind}): {len(packed[i])} bytes{shared}")
     print(f"Total image data: {total} bytes")
 
     # Verification
@@ -456,17 +654,23 @@ def main():
             f"dy shift needs black at palette index 0, got {palette_rgb[0]}"
 
     recon_indexed = {}
-    for i, info in enumerate(frame_info):
-        if info['type'] == 'full':
+
+    def compose(i, depth=0):
+        assert depth <= total_frames, f"ref cycle at frame {i}"
+        if i in recon_indexed:
+            return recon_indexed[i]
+        if emit_type(i) == 'full':
             recon_indexed[i] = indexed_data[i]
         else:
-            ref_idx = info['spec']['ref']
-            assert ref_idx < i, f"Frame {i} ref {ref_idx} must be an earlier frame"
-            base = shift_rows(recon_indexed[ref_idx], info['spec']['dy'], 0)
-            x, y, w, h = info['region']
+            ref_idx, dy = emit_ref_dy(i)
+            base = shift_rows(compose(ref_idx, depth + 1), dy, 0)
+            x, y, w, h = emit_region(i)
             base[y:y+h, x:x+w] = indexed_data[i]
             recon_indexed[i] = base
-        reconstructed = indexed_to_rgb(recon_indexed[i])
+        return recon_indexed[i]
+
+    for i, info in enumerate(frame_info):
+        reconstructed = indexed_to_rgb(compose(i))
 
         original = gif_frames[info['spec']['gif']]
         diff = np.any(reconstructed != original, axis=2)

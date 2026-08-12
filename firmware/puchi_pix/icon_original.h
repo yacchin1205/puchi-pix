@@ -1,7 +1,7 @@
 // Auto-generated image data: original
 // Source: original.gif
-// Config: 0:1::2000,1:2:0:200,2:3:0:300,1:0:0:200
-// Run: python3 resources/generate_image_data.py "/Users/yazawa/Downloads/original.gif" "0:1::2000,1:2:0:200,2:3:0:300,1:0:0:200" 1.0 1.0 --walk-seq 0 --greet-start 1
+// Config: 0:1::2000,1:2:0:200,2:3:0:300,1:1:0:200
+// Run: python3 resources/generate_image_data.py "/Users/yazawa/Downloads/original.gif" "0:1::2000,1:2:0:200,2:3:0:300,1:1:0:200" 1.0 1.0 --walk-seq 0 --main-start 1
 
 #define IMG_W 64
 #define IMG_H 64
@@ -223,9 +223,12 @@ static const Frame frames[FRAME_COUNT] PROGMEM = {
   { 0, 1, 0, 0, 0, 0, 0, 0, 2000, frame_data_0 },  // f0: full 2000ms -> f1
   { 1, 2, 0, 17, 1, 28, 38, 0, 200, frame_data_1 },  // f1: overlay on 0 200ms -> f2
   { 1, 3, 0, 18, 1, 26, 40, 0, 300, frame_data_2 },  // f2: overlay on 0 300ms -> f3
-  { 1, 0, 0, 17, 1, 28, 38, 0, 200, frame_data_1 },  // f3: overlay on 0 200ms -> f0
+  { 1, 1, 0, 17, 1, 28, 38, 0, 200, frame_data_1 },  // f3: overlay on 0 200ms -> f1
 };
 
 // Frame roles consumed by the walk animation in puchi_pix.ino
+#define HAS_WALK 1
 static constexpr uint8_t WALK_SEQ[] = {0};
-static constexpr uint8_t FRAME_GREET_START = 1;
+static constexpr uint8_t FRAME_INTRO_START = FRAME_NONE;
+static constexpr uint8_t FRAME_MAIN_START = 1;
+static constexpr uint8_t FRAME_OUTRO_START = FRAME_NONE;

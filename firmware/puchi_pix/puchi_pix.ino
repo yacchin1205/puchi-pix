@@ -9,6 +9,10 @@
 #include "frame.h"
 #include "icon_original.h"
 
+#ifndef HAS_WALK
+#error "icon header predates frame roles; regenerate with resources/generate_image_data.py"
+#endif
+
 // =====================
 // ディスプレイ抽象化レイヤー
 // =====================
@@ -16,6 +20,10 @@
 
 // デバッグ: loopカウンタをY=0に表示
 #define DEBUG_LOOP_COUNTER 0
+
+// 手持ち検出診断: ドリフト量をY=0(X軸)/Y=1(Y軸)にバー表示。
+// 閾値=白ティック(x=32)、検出中=右端赤。リリースビルドでは0にする。
+#define PUCHI_DIAG_HANDLE 0
 
 // 上方向インジケーター (赤ドット)。フラッシュ節約のためデフォルト無効
 #define ENABLE_UP_INDICATOR 0
@@ -67,10 +75,14 @@ static uint32_t lastFrameTime = 0;
 
 // =====================
 // 歩き登場アニメーション
-// 右から歩いて入場 → 中央で振り向いて手を挙げる → 左へ歩いて退場
+// 右から歩いて入場 → 中割り(入り) → メインループ → 中割り(戻り) → 左へ歩いて退場
+// メインは手持ち検出が続く間ループし、ループ境界で退場側へ抜ける。
 // =====================
-// フレーム役割 (WALK_SEQ / FRAME_GREET_START) はアイコンヘッダが定義する。
-// greetチェーンは next が WALK_SEQ[0] に戻ったところで終端。
+// フレーム役割 (WALK_SEQ / FRAME_INTRO_START / FRAME_MAIN_START /
+// FRAME_OUTRO_START) はアイコンヘッダが定義する。FRAME_NONE は省略。
+// introチェーンは curFrame が FRAME_MAIN_START に達したところで終端。
+// mainチェーンは FRAME_MAIN_START に戻る循環。
+// outroチェーンは next が WALK_SEQ[0] に戻ったところで終端。
 static uint8_t walkPhase = 0;  // WALK_SEQ内の現在位置
 
 static constexpr int16_t  WALK_CENTER_X = (DISPLAY_W - IMG_W) / 2;
@@ -80,7 +92,9 @@ static constexpr uint8_t  WALK_STEP_PX  = 4;
 static constexpr uint16_t WALK_STEP_MS  = 150;
 static constexpr uint16_t WALK_PAUSE_MS = 800;         // 退場後、再入場までの待ち
 
-enum WalkMode : uint8_t { MODE_WALK_IN, MODE_GREET, MODE_WALK_OUT, MODE_OFFSCREEN };
+enum WalkMode : uint8_t {
+  MODE_WALK_IN, MODE_INTRO, MODE_MAIN, MODE_OUTRO, MODE_WALK_OUT, MODE_OFFSCREEN
+};
 static uint8_t walkMode = MODE_WALK_IN;
 static int16_t spriteX  = WALK_ENTER_X;  // 見た目上のX位置 (orient 3では鏡映して描画)
 
@@ -93,10 +107,15 @@ static inline void write8(uint8_t reg, uint8_t val) {
 }
 
 // ---------- Display Power / Sleep ----------
-static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
-static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
+// HAS_WALK: フェーズ駆動。退場後(OFFSCREEN)は即減光し、OFFSCREEN_SLEEP_MS
+// でスリープ。再生中は減光しない。
+// 単純ループ (HAS_WALK 0): 従来どおり lastActivityMs からのタイマー駆動。
+static constexpr uint32_t DIM_TIMEOUT_MS      = 10000;
+static constexpr uint32_t SLEEP_TIMEOUT_MS    = 30000;
+static constexpr uint32_t OFFSCREEN_SLEEP_MS  = 10000;
 
 static uint32_t lastActivityMs = 0;
+static uint32_t offscreenEnterMs = 0;
 
 static void setWakeupThreshold(uint16_t counts12) {
   counts12 &= 0x0FFF;
@@ -112,6 +131,15 @@ static void clearLatchedInterrupt() {
   (void)Wire.read();
 }
 
+// 分解能切り替え。手持ち検出には12bitが必要 (8bitは1LSB≈256カウントで、
+// 手持ちの微小ドリフトが量子化に埋もれて検出が続かない)。スリープ中は
+// 省電力の8bitに戻す (12bit: 155µA / 8bit: 10µA)。ウェイク機能の
+// サンプリングはOWUF (CTRL2) 独立なのでRESの影響を受けない。
+static void setAccelHighRes(bool highRes) {
+  write8(REG_CTRL1, 0x00); delay(10);
+  write8(REG_CTRL1, highRes ? 0xC2 : 0x82); delay(50);
+}
+
 static void enableWakeupInterrupt() {
   write8(REG_CTRL1, 0x00); delay(10);
   write8(REG_CTRL2, 0x04);
@@ -119,7 +147,7 @@ static void enableWakeupInterrupt() {
   setWakeupThreshold(64);
   write8(REG_INT_CTRL2, 0x3F);
   write8(REG_INT_CTRL1, 0x20);
-  write8(REG_CTRL1, 0x82); delay(50);
+  write8(REG_CTRL1, 0xC2); delay(50);
   clearLatchedInterrupt();
 }
 
@@ -229,16 +257,31 @@ static void clearColumns(int16_t x0, int16_t x1) {  // [x0, x1) を黒でクリ�
   }
 }
 
-// アニメーションを初期状態 (右から歩き入場) に戻す
-static void resetAnimation() {
+#if HAS_WALK
+// 中央のチェーン再生を終えて左へ歩き出す
+static void startWalkOut() {
+  walkMode = MODE_WALK_OUT;
   walkPhase = 0;
   curFrame = WALK_SEQ[0];
-  lastDrawnFrame = -1;
+}
+#endif
+
+// アニメーションを初期状態に戻す (HAS_WALK: 右から歩き入場)
+static void resetAnimation() {
+#if HAS_WALK
+  walkPhase = 0;
+  curFrame = WALK_SEQ[0];
   walkMode = MODE_WALK_IN;
   spriteX = WALK_ENTER_X;
+#else
+  curFrame = 0;
+  spriteX = WALK_CENTER_X;
+#endif
+  lastDrawnFrame = -1;
   displayFillScreen(0, 0, 0);
 }
 
+#if HAS_WALK
 static void walkStep(uint8_t orient) {
   int16_t oldPos = walkScreenX(orient);
   spriteX -= WALK_STEP_PX;
@@ -252,6 +295,7 @@ static void walkStep(uint8_t orient) {
   else if (newPos < oldPos) clearColumns(newPos + IMG_W, oldPos + IMG_W);
   lastDrawnFrame = -1;  // 位置が動いたので差分描画の前提を無効化
 }
+#endif  // HAS_WALK
 
 static void drawCurrentFrame(uint8_t frameIdx, uint8_t orient) {
   currentOrient = orient;
@@ -307,10 +351,7 @@ static void calibrateKXTJ3(uint8_t samples=80) {
   calibrated = 1;
 }
 
-static uint8_t detectOrientation() {
-  int16_t rx, ry, rz;
-  if (!calibrated || !readXYZRaw(rx, ry, rz)) return currentOrient;
-
+static uint8_t classifyOrientation(int16_t rx, int16_t ry) {
   int16_t dx = (xRef - rx) * ACCEL_X_SIGN;
   int16_t dy = (ry - yRef) * ACCEL_Y_SIGN;
 
@@ -327,6 +368,91 @@ static uint8_t detectOrientation() {
   if (absDy > thresholdIn) return (dy < 0) ? 3 : 0;
   return currentOrient;
 }
+
+// ---------- 手持ち検出 (向きドリフト) ----------
+// 速いローパス(τ=200ms)と遅いローパス(τ=2000ms)の差が閾値を超えた状態が
+// 続いたら「手に持っている」と判定する。瞬時値では静置ノイズと静かな
+// 手持ちを分離できない (ESP32での実測知見)。
+// 固定小数点は<<6: diffが最大2^22なのでdtを256msでクランプすれば
+// int32乗算に収まる (M0+でint64を避ける)。
+static constexpr uint32_t LP_TAU_MS        = 200;
+static constexpr uint32_t LP_SLOW_TAU_MS   = 2000;
+static constexpr uint32_t HANDLE_SAMPLE_MS = 20;  // KXTJ3 ODR 50Hzに合わせる
+static constexpr int32_t  HANDLE_DRIFT_THRESH = 300;
+static constexpr uint8_t  HANDLE_DEBOUNCE  = 3;
+static constexpr uint32_t HANDLE_HOLD_MS   = 2000;
+
+static int32_t xLpFP, yLpFP, xSlowFP, ySlowFP;  // <<6固定小数点
+static bool     lpInit = false;
+static uint32_t lastLpMs = 0;
+static uint8_t  driftCount = 0;
+static uint32_t lastHandleMs = 0;
+
+#if PUCHI_DIAG_HANDLE
+static int32_t diagDriftX = 0, diagDriftY = 0;
+#endif
+
+static bool handleHeld(uint32_t now) {
+  return (now - lastHandleMs) < HANDLE_HOLD_MS;
+}
+
+static void updateHandling(int16_t rx, int16_t ry, uint32_t now) {
+  if (!lpInit) {
+    xLpFP = (int32_t)rx << 6;
+    yLpFP = (int32_t)ry << 6;
+    xSlowFP = xLpFP;
+    ySlowFP = yLpFP;
+    lastLpMs = now;
+    lpInit = true;
+    return;
+  }
+  uint32_t dt = now - lastLpMs;
+  if (dt < HANDLE_SAMPLE_MS) return;
+  lastLpMs = now;
+  if (dt > 256) dt = 256;
+  int32_t dtF = (int32_t)(dt > LP_TAU_MS ? LP_TAU_MS : dt);
+  xLpFP += (((int32_t)rx << 6) - xLpFP) * dtF / (int32_t)LP_TAU_MS;
+  yLpFP += (((int32_t)ry << 6) - yLpFP) * dtF / (int32_t)LP_TAU_MS;
+  xSlowFP += (xLpFP - xSlowFP) * (int32_t)dt / (int32_t)LP_SLOW_TAU_MS;
+  ySlowFP += (yLpFP - ySlowFP) * (int32_t)dt / (int32_t)LP_SLOW_TAU_MS;
+
+  int32_t dx = (xLpFP - xSlowFP) >> 6;
+  int32_t dy = (yLpFP - ySlowFP) >> 6;
+  if (dx < 0) dx = -dx;
+  if (dy < 0) dy = -dy;
+#if PUCHI_DIAG_HANDLE
+  diagDriftX = dx;
+  diagDriftY = dy;
+#endif
+  if (dx > HANDLE_DRIFT_THRESH || dy > HANDLE_DRIFT_THRESH) {
+    if (driftCount < HANDLE_DEBOUNCE) driftCount++;
+    if (driftCount >= HANDLE_DEBOUNCE) {
+      lastHandleMs = now;
+      lastActivityMs = now;  // 手持ち中に減光させない
+    }
+  } else {
+    driftCount = 0;
+  }
+}
+
+#if PUCHI_DIAG_HANDLE
+static void drawHandleDiag(bool held) {
+  for (uint8_t row = 0; row < 2; row++) {
+    int32_t drift = row ? diagDriftY : diagDriftX;
+    int32_t len = drift * 32 / HANDLE_DRIFT_THRESH;  // 閾値がx=32に対応
+    if (len > DISPLAY_W) len = DISPLAY_W;
+    displayBeginWrite(0, row, DISPLAY_W, 1);
+    for (uint8_t x = 0; x < DISPLAY_W; x++) {
+      uint16_t c = 0x0000;
+      if ((int32_t)x < len) c = row ? 0x07FF : 0x07E0;
+      if (x == 32) c = 0xFFFF;
+      if (held && x >= DISPLAY_W - 4) c = 0xF800;
+      displayWritePixel(c);
+    }
+    displayEndWrite();
+  }
+}
+#endif
 
 // ---------- 上方向インジケーター ----------
 #if ENABLE_UP_INDICATOR
@@ -425,20 +551,31 @@ void setup() {
   resetAnimation();
   lastActivityMs = millis();
   lastFrameTime = millis();
+  lastHandleMs = millis() - HANDLE_HOLD_MS;  // 起動直後は「手持ちでない」
 }
 
 void loop() {
   uint32_t now = millis();
+#if HAS_WALK
+  // フェーズ駆動: 退場後のOFFSCREENでのみ減光/スリープする
+  bool dimNow = (walkMode == MODE_OFFSCREEN);
+  bool sleepNow = dimNow && (now - offscreenEnterMs >= OFFSCREEN_SLEEP_MS);
+#else
   uint32_t elapsed = now - lastActivityMs;
+  bool dimNow = (elapsed >= DIM_TIMEOUT_MS);
+  bool sleepNow = (elapsed >= SLEEP_TIMEOUT_MS);
+#endif
 
   // スリープ
-  if (elapsed >= SLEEP_TIMEOUT_MS) {
+  if (sleepNow) {
     displayBrightness(BRIGHT_OFF);
+    setAccelHighRes(false);
     clearLatchedInterrupt();
     HAL_SuspendTick();
     __DSB();
     HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
     HAL_ResumeTick();
+    setAccelHighRes(true);
     displayBrightness(BRIGHT_FULL);
     lastActivityMs = millis();
     lastFrameTime = millis();
@@ -447,14 +584,15 @@ void loop() {
   }
 
   // ディム
-  if (elapsed >= DIM_TIMEOUT_MS) {
-    displayBrightness(BRIGHT_DIM);
-  } else {
-    displayBrightness(BRIGHT_FULL);
-  }
+  displayBrightness(dimNow ? BRIGHT_DIM : BRIGHT_FULL);
+
+  // 加速度読み取り (向き検出と手持ち検出で共有)
+  int16_t rx, ry, rz;
+  bool accelOk = calibrated && readXYZRaw(rx, ry, rz);
+  if (accelOk) updateHandling(rx, ry, now);
 
   // 傾き検出 (クールダウン中はキューに溜める)
-  uint8_t orient = detectOrientation();
+  uint8_t orient = accelOk ? classifyOrientation(rx, ry) : currentOrient;
   bool inCooldown = (now - lastOrientChangeMs) < ORIENT_COOLDOWN_MS;
 
   if (orient != currentOrient) {
@@ -480,26 +618,35 @@ void loop() {
   }
 
   // アニメーション進行
-  if (walkMode == MODE_GREET) {
-    // 中央での振り向き〜手上げはFrameチェーンで再生
+#if HAS_WALK
+  if (walkMode == MODE_INTRO || walkMode == MODE_MAIN || walkMode == MODE_OUTRO) {
+    // 中央でのフレームチェーン再生
     uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
     if (now - lastFrameTime >= duration) {
       lastFrameTime = now;
       uint8_t nextFrame = pgm_read_byte(&frames[curFrame].next);
-      if (nextFrame == WALK_SEQ[0]) {
-        // チェーン終端 (振り向き戻し完了) → 左へ歩き出す
-        walkMode = MODE_WALK_OUT;
-        walkPhase = 0;
-        curFrame = WALK_SEQ[0];
+      if (walkMode == MODE_MAIN && nextFrame == FRAME_MAIN_START && !handleHeld(now)) {
+        // ループ境界で手持ちが切れていたら退場側へ
+        if (FRAME_OUTRO_START != FRAME_NONE) {
+          walkMode = MODE_OUTRO;
+          curFrame = FRAME_OUTRO_START;
+        } else {
+          startWalkOut();
+        }
+      } else if (walkMode == MODE_OUTRO && nextFrame == WALK_SEQ[0]) {
+        // outroチェーン終端 → 左へ歩き出す
+        startWalkOut();
       } else {
         curFrame = nextFrame;
+        if (walkMode == MODE_INTRO && curFrame == FRAME_MAIN_START) walkMode = MODE_MAIN;
       }
     }
     if (lastDrawnFrame < 0 || (uint8_t)lastDrawnFrame != curFrame) {
       drawCurrentFrame(curFrame, orient);
     }
   } else if (walkMode == MODE_OFFSCREEN) {
-    if (now - lastFrameTime >= WALK_PAUSE_MS) {
+    // 手持ち検出があったときだけ次のサイクルへ (WALK_PAUSE_MSは最小間隔)
+    if (now - offscreenEnterMs >= WALK_PAUSE_MS && handleHeld(now)) {
       lastFrameTime = now;
       walkMode = MODE_WALK_IN;
       spriteX = WALK_ENTER_X;
@@ -510,21 +657,42 @@ void loop() {
     if (now - lastFrameTime >= WALK_STEP_MS) {
       lastFrameTime = now;
       if (walkMode == MODE_WALK_IN && spriteX <= WALK_CENTER_X) {
-        // 中央到達 → 振り向いて挨拶
-        walkMode = MODE_GREET;
-        curFrame = FRAME_GREET_START;
+        // 中央到達 → 中割り(なければメイン)へ
+        walkMode = (FRAME_INTRO_START != FRAME_NONE) ? MODE_INTRO : MODE_MAIN;
+        curFrame = (walkMode == MODE_INTRO) ? FRAME_INTRO_START : FRAME_MAIN_START;
         lastDrawnFrame = -1;
         drawCurrentFrame(curFrame, orient);
       } else if (walkMode == MODE_WALK_OUT && spriteX <= WALK_EXIT_X) {
         walkMode = MODE_OFFSCREEN;
+        offscreenEnterMs = now;
       } else {
         walkStep(orient);
       }
     }
   }
+#else  // 単純ループ: nextチェーンをそのまま再生
+  {
+    uint16_t duration = pgm_read_word(&frames[curFrame].duration_ms);
+    if (now - lastFrameTime >= duration) {
+      lastFrameTime = now;
+      curFrame = pgm_read_byte(&frames[curFrame].next);
+    }
+    if (lastDrawnFrame < 0 || (uint8_t)lastDrawnFrame != curFrame) {
+      drawCurrentFrame(curFrame, orient);
+    }
+  }
+#endif
 
 #if ENABLE_UP_INDICATOR
   drawUpIndicator();
+#endif
+
+#if PUCHI_DIAG_HANDLE
+  static uint32_t lastDiagMs = 0;
+  if (now - lastDiagMs >= 50) {
+    lastDiagMs = now;
+    drawHandleDiag(handleHeld(now));
+  }
 #endif
 
 #if DEBUG_LOOP_COUNTER
