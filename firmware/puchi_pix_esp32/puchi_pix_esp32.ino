@@ -182,6 +182,10 @@ static constexpr uint8_t I2C_SDA  = 20;
 static constexpr uint8_t I2C_SCL  = 21;
 static constexpr uint8_t KXTJ3_INT_PIN = 5;
 
+// Status LED D1: 3.3V -> 4.7k -> LED -> GPIO0, so LOW = lit. Shows an
+// active BLE connection.
+static constexpr uint8_t STATUS_LED = 0;
+
 static constexpr int WIDTH  = 240;
 static constexpr int HEIGHT = 240;
 
@@ -1537,9 +1541,11 @@ class ServerCB : public BLEServerCallbacks {
     bleConnected = true;
     uploadPos = 0;
     setStatus(STATUS_IDLE);
+    digitalWrite(STATUS_LED, LOW);
   }
   void onDisconnect(BLEServer*) override {
     bleConnected = false;
+    digitalWrite(STATUS_LED, HIGH);
     BLEDevice::startAdvertising();
   }
 };
@@ -1645,6 +1651,9 @@ static void bleSetup() {
 
 void setup() {
   gpio_hold_dis((gpio_num_t)TFT_RST);
+
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, HIGH);   // off until a BLE central connects
 
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
