@@ -204,6 +204,7 @@
     const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
     const PROTO   = '5550eec9-b00f-4444-9876-ab12cd34ef06';
+    const DIAG    = '5550eec9-b00f-4444-9876-ab12cd34ef07';  // present only on diagnostic firmware
 
     // ---- Image format constants (must match firmware) ----
     // Payload v6: 8B header (magic, version=6, N uint16 LE, size, bpp,
@@ -437,6 +438,29 @@
         } catch (_) {
           log(T.logProtoMissing);
         }
+        // Diagnostic firmware (PUCHI_DIAG_ACCEL) streams accel deviation
+        // maxima; subscribe and log when the characteristic exists. Values
+        // below the noise floor of interest are skipped to keep the log
+        // readable.
+        try {
+          const diagChar = await service.getCharacteristic(DIAG);
+          const PHASES = ['gap', 'enter', 'intro', 'main', 'shake', 'outro', 'exit'];
+          await diagChar.startNotifications();
+          diagChar.addEventListener('characteristicvaluechanged', (e) => {
+            const v = e.target.value;
+            const adx = v.getUint16(0, true);   // instantaneous dev (shake)
+            const ady = v.getUint16(2, true);
+            const ddx = v.getUint16(4, true);   // orientation drift (handling)
+            const ddy = v.getUint16(6, true);
+            const phase = PHASES[v.getUint8(8)] ?? v.getUint8(8);
+            const det = v.getUint8(9);
+            if (adx > 100 || ady > 100 || ddx > 50 || ddy > 50 || det) {
+              log(`diag: adx=${adx} ady=${ady} ddx=${ddx} ddy=${ddy} ` +
+                  `phase=${phase}${det ? ' DETECT' : ''}`);
+            }
+          });
+          log('diag: accel diagnostics stream enabled');
+        } catch (_) {}
         await statusChar.startNotifications();
         statusChar.addEventListener('characteristicvaluechanged', (e) => {
           const v = e.target.value.getUint8(0);

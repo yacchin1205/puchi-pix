@@ -127,6 +127,17 @@
 #define BLE_STATUS_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef04"
 #define BLE_PROTO_UUID        "5550eec9-b00f-4444-9876-ab12cd34ef06"
 
+// Accelerometer diagnostics: define to add a BLE characteristic (…ef07,
+// Read/Notify) streaming, every 200 ms, the window's max instantaneous
+// deviation and orientation drift per axis plus the motion phase — for
+// tuning HANDLE_DRIFT_THRESH / SHAKE_THRESH against measured noise. Off by
+// default; the uploader subscribes and logs automatically when the
+// characteristic exists.
+// #define PUCHI_DIAG_ACCEL 1
+#ifdef PUCHI_DIAG_ACCEL
+#define BLE_DIAG_UUID         "5550eec9-b00f-4444-9876-ab12cd34ef07"
+#endif
+
 static constexpr uint8_t PAYLOAD_VER_MIN = 1;
 static constexpr uint8_t PAYLOAD_VER_MAX = 6;
 
@@ -182,8 +193,10 @@ static constexpr uint8_t I2C_SDA  = 20;
 static constexpr uint8_t I2C_SCL  = 21;
 static constexpr uint8_t KXTJ3_INT_PIN = 5;
 
-// Status LED D1: 3.3V -> 4.7k -> LED -> GPIO0, so LOW = lit. Shows an
-// active BLE connection.
+// Status LED D1: 3.3V -> 4.7k -> LED -> GPIO0, so LOW = lit. Blinks for a
+// second whenever (debounced) handling detection fires — the events that
+// keep the device awake and trigger walk-ins — so spurious accelerometer
+// activity is visible on a stationary device.
 static constexpr uint8_t STATUS_LED = 0;
 
 static constexpr int WIDTH  = 240;
@@ -922,6 +935,7 @@ static constexpr uint8_t MOUNT_NEUTRAL_BIN = 0;
 // hand tremor and linear-acceleration wobble that the old ~10 ms-equivalent
 // EMA passed straight through.
 static constexpr int32_t LP_TAU_MS = 200;
+static constexpr int32_t LP_SLOW_TAU_MS = 2000;  // handling-drift reference
 static constexpr int32_t MAG2_MIN = 24000000L;
 static constexpr uint8_t HYSTERESIS_SHIFT = 8;
 
@@ -955,7 +969,13 @@ static uint8_t currentBin = 0;
 static uint32_t lastFrameTime = 0;
 static uint16_t frameBuf[(uint32_t)MAX_IMG_SIZE * MAX_IMG_SIZE];
 static int16_t xRef = 0, yRef = 0, zRef = 0;
-static int32_t fxLp = 0, fyLp = 0;
+// Lowpass state is kept in <<8 fixed point: with the blend factor dt/tau
+// evaluated in integers, a plain-counts filter stalls once the remaining
+// difference falls below tau (2000 counts for the slow reference — found
+// the hard way). The fixed-point step shrinks that dead zone to tau/256.
+static int32_t fxLpFP = 0, fyLpFP = 0;
+static int32_t fxSlowFP = 0, fySlowFP = 0;
+static int32_t fxLp = 0, fyLp = 0;        // fxLpFP >> 8, for bin/magnitude use
 static uint32_t lastLpUpdateMs = 0;
 
 // Reset playback to frame 0 and compose it into frameBuf.
@@ -1044,14 +1064,27 @@ static void animAdvanceRange(uint16_t first, uint16_t last) {
 // Device-handling detection: raw accel deviating from the 200 ms lowpass by
 // more than ~0.04 g (600 counts at 16384/g) on either axis counts as
 // handling; it is considered ongoing for HANDLE_HOLD_MS after the last hit.
-static constexpr int32_t HANDLE_THRESH = 600;
+// Handling detection. Measured on this hardware, the instantaneous
+// |raw - lowpass| deviation of a resting device (windows peak ~700 counts)
+// overlaps a quietly held one (~800), so no instantaneous threshold can
+// separate them. Orientation drift can: the ~200 ms lowpass pulling away
+// from a ~2 s reference. A held device wanders by degrees over seconds
+// (1 deg of tilt ~= 286 counts at 1 g) while a resting one averages to
+// near zero on both timescales.
+static constexpr int32_t HANDLE_DRIFT_THRESH = 300;
+static constexpr uint8_t HANDLE_DEBOUNCE = 3;
 static constexpr uint32_t HANDLE_HOLD_MS = 2000;
+static uint8_t handleStreak = 0;
 static uint32_t lastHandledMs = 0;
+static uint32_t handleLedMs = 0;
 
-// Shake detection: a much larger deviation (~0.5 g) than plain handling.
-// Only shakes seen while the main loop is on screen arm the shake segment,
-// so a vigorous pickup doesn't fire it on entry.
+// Shake detection stays on the instantaneous deviation: measured windows
+// reach 10k-20k counts when shaken vs <700 at rest, a >10x margin. Only
+// shakes seen while the main loop is on screen arm the shake segment, so a
+// vigorous pickup doesn't fire it on entry.
 static constexpr int32_t SHAKE_THRESH = 8000;
+static constexpr uint8_t SHAKE_DEBOUNCE = 3;
+static uint8_t shakeStreak = 0;
 static bool shakePending = false;
 
 enum MotionPhase : uint8_t {
@@ -1303,6 +1336,15 @@ static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
 
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pStatusChar = nullptr;
+#ifdef PUCHI_DIAG_ACCEL
+static BLECharacteristic* pDiagChar = nullptr;
+static int32_t diagMaxAdx = 0;
+static int32_t diagMaxAdy = 0;
+static int32_t diagMaxDdx = 0;
+static int32_t diagMaxDdy = 0;
+static bool diagDetected = false;
+static uint32_t diagNotifyMs = 0;
+#endif
 
 static void setStatus(uint8_t s) {
   uploadStatus = s;
@@ -1541,11 +1583,9 @@ class ServerCB : public BLEServerCallbacks {
     bleConnected = true;
     uploadPos = 0;
     setStatus(STATUS_IDLE);
-    digitalWrite(STATUS_LED, LOW);
   }
   void onDisconnect(BLEServer*) override {
     bleConnected = false;
-    digitalWrite(STATUS_LED, HIGH);
     BLEDevice::startAdvertising();
   }
 };
@@ -1641,6 +1681,13 @@ static void bleSetup() {
   uint8_t proto[4] = { PAYLOAD_VER_MAX, PAYLOAD_VER_MIN, 0, 0 };
   pProto->setValue(proto, 4);
 
+#ifdef PUCHI_DIAG_ACCEL
+  pDiagChar = pService->createCharacteristic(
+    BLE_DIAG_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pDiagChar->addDescriptor(new BLE2902());
+#endif
+
   pService->start();
 
   BLEAdvertising* pAdv = BLEDevice::getAdvertising();
@@ -1653,7 +1700,7 @@ void setup() {
   gpio_hold_dis((gpio_num_t)TFT_RST);
 
   pinMode(STATUS_LED, OUTPUT);
-  digitalWrite(STATUS_LED, HIGH);   // off until a BLE central connects
+  digitalWrite(STATUS_LED, HIGH);   // off until handling is detected
 
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
@@ -1692,6 +1739,10 @@ void setup() {
   currentBin = 0;
   fxLp = (int32_t)xRef * ACCEL_X_SIGN;
   fyLp = (int32_t)yRef * ACCEL_Y_SIGN;
+  fxLpFP = fxLp << 8;
+  fyLpFP = fyLp << 8;
+  fxSlowFP = fxLpFP;
+  fySlowFP = fyLpFP;
   lastFrameTime = millis();
   lastActivityMs = millis();
   lastLpUpdateMs = millis();
@@ -1719,6 +1770,25 @@ void setup() {
 
 void loop() {
   uint32_t now = millis();
+  digitalWrite(STATUS_LED, (now - handleLedMs < 1000) ? LOW : HIGH);
+
+#ifdef PUCHI_DIAG_ACCEL
+  if (pDiagChar && now - diagNotifyMs >= 200) {
+    diagNotifyMs = now;
+    uint8_t d[10] = {
+      (uint8_t)diagMaxAdx, (uint8_t)(((uint32_t)diagMaxAdx >> 8) & 0xFF),
+      (uint8_t)diagMaxAdy, (uint8_t)(((uint32_t)diagMaxAdy >> 8) & 0xFF),
+      (uint8_t)diagMaxDdx, (uint8_t)(((uint32_t)diagMaxDdx >> 8) & 0xFF),
+      (uint8_t)diagMaxDdy, (uint8_t)(((uint32_t)diagMaxDdy >> 8) & 0xFF),
+      (uint8_t)motionPhase,
+      (uint8_t)(diagDetected ? 1 : 0),
+    };
+    pDiagChar->setValue(d, 10);
+    pDiagChar->notify();
+    diagMaxAdx = diagMaxAdy = diagMaxDdx = diagMaxDdy = 0;
+    diagDetected = false;
+  }
+#endif
 
   // Suppress sleep timer while a host is connected or a transfer is mid-flight.
   if (bleConnected || uploadStatus == STATUS_RECEIVING) {
@@ -1773,24 +1843,55 @@ void loop() {
   if (readXYZRaw(rx, ry, rz)) {
     int32_t fx = (int32_t)rx * ACCEL_X_SIGN;
     int32_t fy = (int32_t)ry * ACCEL_Y_SIGN;
-    // Handling detection: raw deviating from the lowpass = the device is
-    // being moved by hand. Counts as activity (keeps the display awake).
-    int32_t adx = labs(fx - fxLp);
+    int32_t adx = labs(fx - fxLp);              // instantaneous dev (shake)
     int32_t ady = labs(fy - fyLp);
-    if (adx > HANDLE_THRESH || ady > HANDLE_THRESH) {
+    int32_t ddx = labs(fxLpFP - fxSlowFP) >> 8; // orientation drift (handling)
+    int32_t ddy = labs(fyLpFP - fySlowFP) >> 8;
+#ifdef PUCHI_DIAG_ACCEL
+    if (adx > diagMaxAdx) diagMaxAdx = adx;
+    if (ady > diagMaxAdy) diagMaxAdy = ady;
+    if (ddx > diagMaxDdx) diagMaxDdx = ddx;
+    if (ddy > diagMaxDdy) diagMaxDdy = ddy;
+#endif
+    // Handling: the fast lowpass drifting away from the slow reference.
+    // Counts as activity (keeps the display awake).
+    if (ddx > HANDLE_DRIFT_THRESH || ddy > HANDLE_DRIFT_THRESH) {
+      if (handleStreak < HANDLE_DEBOUNCE) handleStreak++;
+    } else {
+      handleStreak = 0;
+    }
+    if (handleStreak >= HANDLE_DEBOUNCE) {
       lastHandledMs = now;
       lastActivityMs = now;
+      handleLedMs = now;
+#ifdef PUCHI_DIAG_ACCEL
+      diagDetected = true;
+#endif
     }
-    if ((adx > SHAKE_THRESH || ady > SHAKE_THRESH) &&
-        motionOn() && motionPhase == PH_MAIN && hasShakeSeg()) {
-      shakePending = true;
+    // Shake: sustained instantaneous spikes far above the rest noise.
+    if (adx > SHAKE_THRESH || ady > SHAKE_THRESH) {
+      if (shakeStreak < SHAKE_DEBOUNCE) shakeStreak++;
+    } else {
+      shakeStreak = 0;
+    }
+    if (shakeStreak >= SHAKE_DEBOUNCE) {
+      lastHandledMs = now;                // shaking is handling, too
+      lastActivityMs = now;
+      if (motionOn() && motionPhase == PH_MAIN && hasShakeSeg()) {
+        shakePending = true;
+      }
     }
     int32_t dt = (int32_t)(now - lastLpUpdateMs);
     if (dt > 0) {
-      if (dt > LP_TAU_MS) dt = LP_TAU_MS;
       lastLpUpdateMs = now;
-      fxLp += (fx - fxLp) * dt / LP_TAU_MS;
-      fyLp += (fy - fyLp) * dt / LP_TAU_MS;
+      int32_t dtF = (dt > LP_TAU_MS) ? LP_TAU_MS : dt;
+      fxLpFP += (int32_t)(((int64_t)((fx << 8) - fxLpFP) * dtF) / LP_TAU_MS);
+      fyLpFP += (int32_t)(((int64_t)((fy << 8) - fyLpFP) * dtF) / LP_TAU_MS);
+      fxLp = fxLpFP >> 8;
+      fyLp = fyLpFP >> 8;
+      int32_t dtS = (dt > LP_SLOW_TAU_MS) ? LP_SLOW_TAU_MS : dt;
+      fxSlowFP += (int32_t)(((int64_t)(fxLpFP - fxSlowFP) * dtS) / LP_SLOW_TAU_MS);
+      fySlowFP += (int32_t)(((int64_t)(fyLpFP - fySlowFP) * dtS) / LP_SLOW_TAU_MS);
     }
   }
 
