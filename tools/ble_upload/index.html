@@ -269,6 +269,7 @@
         loopLabel: 'Simple loop',
         mSpeedLabel: 'Walk speed (px/s)', mGapLabel: 'Gap after exit (ms)',
         stripReset: 'Reset markers',
+        stripResetConfirm: 'Reset the frame range and all segment markers to their initial state?',
         pvLabel: 'Preview', pvPlay: 'Play', pvStop: 'Stop',
         eOnLabel: 'Entry', xOnLabel: 'Exit',
         tiOnLabel: 'Intro', toOnLabel: 'Outro',
@@ -323,6 +324,7 @@
         loopLabel: '単純ループ',
         mSpeedLabel: '移動速度 (px/s)', mGapLabel: '退場後の間 (ms)',
         stripReset: '初期状態に戻す',
+        stripResetConfirm: 'フレーム範囲とセグメント設定をすべて初期状態に戻します。よろしいですか?',
         pvLabel: 'プレビュー', pvPlay: '再生', pvStop: '停止',
         eOnLabel: '入場', xOnLabel: '退場',
         tiOnLabel: '中割(前)', toOnLabel: '中割(後)',
@@ -757,6 +759,7 @@
     });
 
     $('strip-reset').addEventListener('click', () => {
+      if (!window.confirm(T.stripResetConfirm)) return;
       const s = stripState;
       const rangeBefore = `${s.rs},${s.re}`;
       s.rs = 1;
