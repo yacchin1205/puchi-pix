@@ -7,13 +7,21 @@ Each frame is either a full frame or an overlay on a reference frame.
 The .ino decides which frame to start at, where to loop, etc.
 
 Run: python3 resources/generate_image_data.py <gif_path> <config> [gamma] [sat_power] \
-       --walk-seq <i,i,...> --greet-start <i>
+       --walk-seq <i,i,...> --main-start <i> [--intro-start <i>] [--outro-start <i>]
 
---walk-seq (required): output frame indices the walk cycle steps through.
---greet-start (required): output frame index where the greet chain begins;
-  the chain follows next pointers and ends when next == WALK_SEQ[0].
-Both are emitted into the header (WALK_SEQ / FRAME_GREET_START) so the icon
-carries its own frame roles; indices are validated against the frame count.
+--walk-seq (optional): output frame indices the walk cycle steps through.
+  Omit for a plain loop icon (no walk presentation, HAS_WALK 0): frames just
+  follow their next chain, and dim/sleep run on the activity timers.
+--main-start (required with --walk-seq): first frame of the main loop; its
+  next chain must cycle back to main-start. The loop repeats while handling
+  is detected.
+--intro-start (optional): one-shot chain played after walking in; its next
+  chain must reach main-start.
+--outro-start (optional): one-shot chain played before walking out; the
+  chain ends when next == WALK_SEQ[0].
+Roles are emitted into the header (HAS_WALK, WALK_SEQ / FRAME_INTRO_START /
+FRAME_MAIN_START / FRAME_OUTRO_START, FRAME_NONE = absent) so the icon
+carries its own frame roles; chains are validated against the config.
 
 gamma (optional, default 1.0): applied to the output palette only.
   OLED panels drive pixels near-linearly, so sRGB artwork looks washed out;
@@ -241,27 +249,82 @@ def shift_rows(img, dy, fill):
     return out
 
 
+def validate_roles(frame_specs, n_frames, walk_seq, intro_start, main_start, outro_start):
+    roles = walk_seq + [main_start] + [v for v in (intro_start, outro_start) if v is not None]
+    bad_roles = [i for i in roles if not 0 <= i < n_frames]
+    if bad_roles:
+        print(f"Error: frame role indices {bad_roles} out of range (frame count {n_frames})")
+        sys.exit(1)
+
+    def follow_next(idx):
+        return frame_specs[idx]['next']
+
+    f = follow_next(main_start)
+    steps = 1
+    while f != main_start:
+        f = follow_next(f)
+        steps += 1
+        if steps > n_frames:
+            print(f"Error: main chain from {main_start} does not cycle back to it")
+            sys.exit(1)
+    if intro_start is not None:
+        if intro_start == main_start:
+            print("Error: intro-start must differ from main-start")
+            sys.exit(1)
+        f = intro_start
+        steps = 0
+        while f != main_start:
+            f = follow_next(f)
+            steps += 1
+            if steps > n_frames:
+                print(f"Error: intro chain from {intro_start} never reaches main-start {main_start}")
+                sys.exit(1)
+    if outro_start is not None:
+        f = outro_start
+        steps = 0
+        while follow_next(f) != walk_seq[0]:
+            f = follow_next(f)
+            steps += 1
+            if steps > n_frames:
+                print(f"Error: outro chain from {outro_start} never returns to WALK_SEQ[0] ({walk_seq[0]})")
+                sys.exit(1)
+
+
 def main():
     args = sys.argv[1:]
     walk_seq = None
-    greet_start = None
+    intro_start = None
+    main_start = None
+    outro_start = None
     positional = []
     i = 0
     while i < len(args):
         if args[i] == '--walk-seq':
             walk_seq = [int(v) for v in args[i + 1].split(',')]
             i += 2
-        elif args[i] == '--greet-start':
-            greet_start = int(args[i + 1])
+        elif args[i] == '--intro-start':
+            intro_start = int(args[i + 1])
+            i += 2
+        elif args[i] == '--main-start':
+            main_start = int(args[i + 1])
+            i += 2
+        elif args[i] == '--outro-start':
+            outro_start = int(args[i + 1])
             i += 2
         else:
             positional.append(args[i])
             i += 1
 
-    if len(positional) < 2 or walk_seq is None or greet_start is None:
-        print(f"Usage: {sys.argv[0]} <gif_path> <config> [gamma] [sat_power] --walk-seq <i,i,...> --greet-start <i>")
+    if len(positional) < 2:
+        print(f"Usage: {sys.argv[0]} <gif_path> <config> [gamma] [sat_power] [--walk-seq <i,i,...> --main-start <i> [--intro-start <i>] [--outro-start <i>]]")
         print(f"  config: comma-separated frame specs: gif_frame:next[:ref[:duration_ms[:dy]]]")
-        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:0:0:150 --walk-seq 0 --greet-start 1")
+        print(f"  Example: 0:1::2000,1:2:0:150,2:3:0:150,3:1:0:150 --walk-seq 0 --main-start 1")
+        sys.exit(1)
+    if walk_seq is None and (main_start is not None or intro_start is not None or outro_start is not None):
+        print("Error: --main-start/--intro-start/--outro-start require --walk-seq")
+        sys.exit(1)
+    if walk_seq is not None and main_start is None:
+        print("Error: --walk-seq requires --main-start")
         sys.exit(1)
 
     gif_path = positional[0]
@@ -283,10 +346,8 @@ def main():
     n_frames = len(frame_specs)
     print(f"Output frames: {n_frames}")
 
-    bad_roles = [i for i in walk_seq + [greet_start] if not 0 <= i < n_frames]
-    if bad_roles:
-        print(f"Error: frame role indices {bad_roles} out of range (frame count {n_frames})")
-        sys.exit(1)
+    if walk_seq is not None:
+        validate_roles(frame_specs, n_frames, walk_seq, intro_start, main_start, outro_start)
 
     # Determine base frame for background detection (first full frame)
     base_gif_idx = None
@@ -391,8 +452,15 @@ def main():
         f.write(f'// Auto-generated image data: {output_name}\n')
         f.write(f'// Source: {os.path.basename(gif_path)}\n')
         f.write(f'// Config: {config_str}\n')
+        role_args = ''
+        if walk_seq is not None:
+            role_args = f' --walk-seq {",".join(map(str, walk_seq))} --main-start {main_start}'
+            if intro_start is not None:
+                role_args += f' --intro-start {intro_start}'
+            if outro_start is not None:
+                role_args += f' --outro-start {outro_start}'
         f.write(f'// Run: python3 resources/generate_image_data.py "{gif_path}" "{config_str}" {gamma} {sat_power}'
-                f' --walk-seq {",".join(map(str, walk_seq))} --greet-start {greet_start}\n\n')
+                f'{role_args}\n\n')
 
         f.write(f'#define IMG_W {img_w}\n')
         f.write(f'#define IMG_H {img_h}\n')
@@ -426,9 +494,18 @@ def main():
             f.write(f' {duration}ms -> f{next_idx}\n')
         f.write('};\n')
 
-        f.write('\n// Frame roles consumed by the walk animation in puchi_pix.ino\n')
-        f.write(f'static constexpr uint8_t WALK_SEQ[] = {{{", ".join(map(str, walk_seq))}}};\n')
-        f.write(f'static constexpr uint8_t FRAME_GREET_START = {greet_start};\n')
+        if walk_seq is not None:
+            f.write('\n// Frame roles consumed by the walk animation in puchi_pix.ino\n')
+            f.write('#define HAS_WALK 1\n')
+            f.write(f'static constexpr uint8_t WALK_SEQ[] = {{{", ".join(map(str, walk_seq))}}};\n')
+            def role(v):
+                return str(v) if v is not None else 'FRAME_NONE'
+            f.write(f'static constexpr uint8_t FRAME_INTRO_START = {role(intro_start)};\n')
+            f.write(f'static constexpr uint8_t FRAME_MAIN_START = {main_start};\n')
+            f.write(f'static constexpr uint8_t FRAME_OUTRO_START = {role(outro_start)};\n')
+        else:
+            f.write('\n// Plain loop icon: frames follow their next chain, no walk presentation\n')
+            f.write('#define HAS_WALK 0\n')
 
     # Summary
     total = PALETTE_SIZE * 2 + sum(len(packed[i]) for i in range(n_frames) if data_owner[i] == i) + n_frames * 16
