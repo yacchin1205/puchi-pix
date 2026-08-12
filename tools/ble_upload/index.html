@@ -64,7 +64,7 @@
     #strip { display: flex; gap: 4px; }
     /* Cell geometry: canvas 40px + 1px border each side = 42px box, plus the
        4px flex gap -> 46px pitch. The segment bar math (CELL) relies on it. */
-    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; }
+    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; cursor: pointer; }
     .thumb canvas {
       display: block;
       width: 40px; height: 40px;
@@ -253,6 +253,8 @@
         logRange: (s, e, n) => `  frame range ${s}–${e} of ${n}`,
         logFrameStats: (k, d, avg, full) =>
           `  ${k} keyframe(s) + ${d} diff frame(s), ${avg} B/frame avg (full: ${full} B)`,
+        logDecodeCost: (adv, jump, full) =>
+          `  decode cost: max advance ${adv} px / max jump ${jump} px (full frame ${full} px)`,
         errTooBig: (t, buf, n, s, k) =>
           `payload ${t} B > device buffer ${buf} B (${n} frames at ${s}x${s}/${k} colors) — narrow the frame range or reduce size/colors`,
         logReset: 'reset...',
@@ -307,6 +309,8 @@
         logRange: (s, e, n) => `  フレーム範囲 ${s}–${e} / 全${n}`,
         logFrameStats: (k, d, avg, full) =>
           `  キーフレーム${k} + 差分${d}, 平均 ${avg} B/フレーム (フル: ${full} B)`,
+        logDecodeCost: (adv, jump, full) =>
+          `  再生コスト: 順送り最大 ${adv} px / ジャンプ最大 ${jump} px (フル ${full} px)`,
         errTooBig: (t, buf, n, s, k) =>
           `ペイロード ${t} B がデバイスバッファ ${buf} B を超えています (${n}フレーム, ${s}x${s}/${k}色) — フレーム範囲を狭めるか、サイズ/色数を減らしてください`,
         logReset: 'リセット...',
@@ -515,6 +519,7 @@
         label.textContent = i;
         d.appendChild(c);
         d.appendChild(label);
+        d.addEventListener('click', () => pvShowFrame(i));
         strip.appendChild(d);
       }
       buildSegbar();
@@ -1068,6 +1073,16 @@
       else pvStart();
     });
 
+    // Clicking a thumbnail shows that frame in the device mock (stopping a
+    // running preview) with the timeline highlight following along.
+    const pvShowFrame = (i) => {
+      pvStop();
+      pvState.phase = 'main';
+      pvState.frame = i;
+      pvState.pos = 0;
+      pvDraw();
+    };
+
     // Clicking the device mock during the main loop requests a shake; it
     // takes effect on the next frame boundary, matching the firmware.
     $('pv').addEventListener('click', () => {
@@ -1337,59 +1352,129 @@
       drawPackedTo($('prev'), packed[0], palette, size, bpp);
 
       // Per-frame records (RLE-compressed): cheapest of keyframe, diff vs
-      // previous frame, or diff vs an earlier reference frame (v5). Refs are
-      // limited to frames composable without ref records — the same rule the
-      // firmware validates — and an exact repeat is a zero-rect ref diff.
+      // previous frame, or diff vs an earlier reference frame (v5), chosen
+      // under a playback-cost bound, not just size:
+      //  - refs may only target frames encoded as keyframes, so decoding a
+      //    ref frame costs one keyframe + its rects (never a chain replay);
+      //    popular targets found in a provisional pass get promoted.
+      //  - a keyframe is forced whenever the replay window since the last
+      //    one exceeds COST_LIMIT pixels, bounding loop-wrap / segment-jump
+      //    recompose (checkpoints placed by accumulated cost — jump targets
+      //    are structural here, so no periodic GOP-style spacing).
       const frameBytes = size * size * bpp / 8;
+      const framePx = size * size;
+      // Jump (wrap/segment-entry) replay bound. v4-era payloads replayed
+      // ~8 full frames per wrap without visible stutter, so that level is
+      // kept; the per-frame advance cost is what the ref->keyframe rule
+      // bounds tightly.
+      const COST_LIMIT = 8 * framePx;
       const encodeRects = (base, cur) => {
         const rects = diffRects(base, cur, size, bpp);
         for (const rc of rects) rc.rle = rleEncode(rc.data);
         return rects;
       };
       const rectsSize = rects => 1 + rects.reduce((a, rc) => a + 6 + rc.rle.length, 0);
-      const REF_CANDIDATES = 32;    // most recent ref-free frames to try
-      const refFree = [];
-      let windowHasRef = false;
-      let keyframes = 0;
-      let refCount = 0;
-      const records = [];
-      for (let i = 0; i < packed.length; i++) {
-        const cur = packed[i];
+      const rectsPx = rects => rects.reduce((a, rc) => a + rc.w * rc.h, 0);
+      const REF_CANDIDATES = 32;    // most recent eligible targets to try
+
+      const clampDur = (i) => {
         // gifuct-js delay is already in milliseconds. Clamp / fallback for
         // GIFs that report 0 or absurdly large.
         let dur = composed[i].delay | 0;
         if (dur < 20) dur = 100;
         if (dur > 65535) dur = 65535;
-        const keyRle = rleEncode(cur);
-        if (i === 0) {
-          records.push({ dur, full: keyRle });
-          keyframes++;
-          refFree.push(0);
-          continue;
+        return dur;
+      };
+
+      // Provisional pass: find each frame's best size-only choice and best
+      // ref target, then promote a target to keyframe only when the total
+      // bytes its referrers save exceed what promoting it costs.
+      const keyRles = packed.map(f => rleEncode(f));
+      const provTargets = new Set();
+      {
+        const nonRefBest = [];       // min(keyframe, prev-diff) per frame
+        const bestRef = [];          // cheapest {r, size} per frame, or null
+        const provSize = [];         // provisionally chosen record size
+        const refFree = [0];
+        let windowHasRef = false;
+        nonRefBest[0] = provSize[0] = 2 + keyRles[0].length;
+        bestRef[0] = null;
+        for (let i = 1; i < packed.length; i++) {
+          const keySize = 2 + keyRles[i].length;
+          const prevSize = rectsSize(encodeRects(packed[i - 1], packed[i]));
+          nonRefBest[i] = Math.min(keySize, prevSize);
+          bestRef[i] = null;
+          for (const r of refFree.slice(-REF_CANDIDATES)) {
+            const s = 2 + rectsSize(encodeRects(packed[r], packed[i]));
+            if (!bestRef[i] || s < bestRef[i].size) bestRef[i] = { r, size: s };
+          }
+          const refWins = bestRef[i] && bestRef[i].size < nonRefBest[i];
+          provSize[i] = refWins ? bestRef[i].size : nonRefBest[i];
+          if (refWins) windowHasRef = true;
+          else if (keySize <= prevSize) { windowHasRef = false; refFree.push(i); }
+          else if (!windowHasRef) refFree.push(i);
         }
-        let best = { size: 2 + keyRle.length, rec: { dur, full: keyRle } };
-        const prevRects = encodeRects(packed[i - 1], cur);
-        if (rectsSize(prevRects) < best.size) {
-          best = { size: rectsSize(prevRects), rec: { dur, rects: prevRects } };
-        }
-        for (const r of refFree.slice(-REF_CANDIDATES)) {
-          const refRects = encodeRects(packed[r], cur);
-          const s = 2 + rectsSize(refRects);
-          if (s < best.size) {
-            best = { size: s, rec: { dur, ref: r, rects: refRects } };
+        const gain = new Map();
+        for (let i = 1; i < packed.length; i++) {
+          const br = bestRef[i];
+          if (br && br.size < nonRefBest[i]) {
+            gain.set(br.r, (gain.get(br.r) || 0) + (nonRefBest[i] - br.size));
           }
         }
-        records.push(best.rec);
-        if (best.rec.full !== undefined) {
-          keyframes++;
-          windowHasRef = false;
-          refFree.push(i);
-        } else if (best.rec.ref !== undefined) {
-          refCount++;
-          windowHasRef = true;
-        } else if (!windowHasRef) {
-          refFree.push(i);
+        for (const [r, g] of gain) {
+          const promoCost = Math.max(0, (2 + keyRles[r].length) - provSize[r]);
+          if (g > promoCost) provTargets.add(r);
         }
+      }
+
+      // Final pass under the cost bound.
+      let keyframes = 0;
+      let refCount = 0;
+      let windowCost = 0;          // replay pixels since the last keyframe
+      let maxAdvance = 0;          // worst single frame-advance cost
+      let maxJump = 0;             // worst composeChainInto cost
+      const keyIdxs = [];          // frames encoded as keyframes (ref targets)
+      const records = [];
+      for (let i = 0; i < packed.length; i++) {
+        const cur = packed[i];
+        const dur = clampDur(i);
+        const keyRle = keyRles[i];
+        let choice = { rec: { dur, full: keyRle }, advPx: framePx };
+        if (i > 0 && !provTargets.has(i)) {
+          const keySize = 2 + keyRle.length;
+          let bestSize = keySize;
+          const prevRects = encodeRects(packed[i - 1], cur);
+          if (rectsSize(prevRects) < bestSize) {
+            bestSize = rectsSize(prevRects);
+            choice = { rec: { dur, rects: prevRects }, advPx: rectsPx(prevRects) };
+          }
+          for (const r of keyIdxs.slice(-REF_CANDIDATES)) {
+            const refRects = encodeRects(packed[r], cur);
+            const s = 2 + rectsSize(refRects);
+            if (s < bestSize) {
+              bestSize = s;
+              choice = {
+                rec: { dur, ref: r, rects: refRects },
+                advPx: framePx + rectsPx(refRects),   // key decode + patches
+              };
+            }
+          }
+          if (choice.rec.full === undefined &&
+              windowCost + choice.advPx > COST_LIMIT) {
+            choice = { rec: { dur, full: keyRle }, advPx: framePx };
+          }
+        }
+        records.push(choice.rec);
+        if (choice.rec.full !== undefined) {
+          keyframes++;
+          keyIdxs.push(i);
+          windowCost = 0;
+        } else {
+          if (choice.rec.ref !== undefined) refCount++;
+          windowCost += choice.advPx;
+        }
+        maxAdvance = Math.max(maxAdvance, choice.advPx);
+        maxJump = Math.max(maxJump, framePx + windowCost);
       }
 
       // Assemble payload (v5)
@@ -1445,6 +1530,7 @@
         }
       }
       log(T.logFrameStats(keyframes, N - keyframes, (total / N).toFixed(0), frameBytes + 3));
+      log(T.logDecodeCost(maxAdvance, maxJump, framePx));
       return out;
     }
 
