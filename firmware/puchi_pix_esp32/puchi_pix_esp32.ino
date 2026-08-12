@@ -9,20 +9,20 @@
 //   Upload  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF02
 //   Commit  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF03
 //   Status  (Read/Notify): 5550EEC9-B00F-4444-9876-AB12CD34EF04
-//   Motion  (Read/Write):  5550EEC9-B00F-4444-9876-AB12CD34EF05
 //   Proto   (Read):        5550EEC9-B00F-4444-9876-AB12CD34EF06
 //
 //   Upload: chunked writes appended in order to a 32 KB buffer.
 //   Commit: 0x01 = validate & swap, 0x02 = buffer reset, 0x03 = revert default.
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
-//   Proto: 4 bytes [payloadVerMax, payloadVerMin, motionCfgLen, reserved].
-//     Read by the uploader on connect so a web/firmware protocol mismatch
-//     is reported explicitly instead of failing as a generic upload error
-//     (or, worse, a misparsed motion config).
-//   Motion: 16 bytes [enabled, mainStart lo/hi, loopStart lo/hi,
-//                     shakeStart lo/hi, outStart lo/hi, exitStart lo/hi,
-//                     speed, gap lo/hi, bg565 lo/hi].
-//     Splits the uploaded animation into up to six segments:
+//   Proto: 4 bytes [payloadVerMax, payloadVerMin, legacyMotionCfgLen,
+//     reserved]. Read by the uploader on connect so a web/firmware protocol
+//     mismatch is reported explicitly instead of failing as a generic
+//     upload error. legacyMotionCfgLen is 0: since v6 the motion config is
+//     embedded in the payload and the Motion characteristic is gone.
+//   Motion block (16 bytes, embedded in v6 payloads):
+//     [enabled, mainStart lo/hi, loopStart lo/hi, shakeStart lo/hi,
+//      outStart lo/hi, exitStart lo/hi, speed, gap lo/hi, bg565 lo/hi].
+//     Splits the animation into up to six segments:
 //       entry walk  [0, mainStart)         loops while walking in
 //       intro trans [mainStart, loopStart) plays once after arriving
 //       main loop   [loopStart, shakeStart | outStart | exitStart | N)
@@ -42,8 +42,8 @@
 //     `speed` source px/s, then the screen stays empty for `gap` ms after
 //     the exit before the next entry. bg565 fills everything outside the
 //     sprite (RGB565), matching the uploader's compositing background.
-//     Cleared by image commit / revert; the uploader re-sends it after each
-//     upload. Persisted to /motion.bin.
+//     Because the block lives inside the payload, image and presentation
+//     are committed, validated and persisted atomically (/img.bin only).
 //
 // Payload (sent via Upload, raw bytes appended in order):
 //   v1 (64x64 fixed):
@@ -85,6 +85,9 @@
 //     PackBits: control c < 128 = copy next c+1 bytes verbatim; c > 128 =
 //     repeat next byte (257 - c) times; c == 128 = no-op. 4bpp data is RLE'd
 //     on the packed bytes.
+//   v6: v5 with a 16-byte motion block between the header and the palette
+//     (palette starts at byte 24); see "Motion block" above. Validated as
+//     part of commit; v3-v5 payloads simply play as a plain loop.
 //   v5: v4 plus referenced-diff records (flags bit1). Instead of diffing
 //     against the previous frame, the rects patch a copy of an arbitrary
 //     EARLIER frame; an exact repeat is simply a referenced diff with zero
@@ -122,11 +125,10 @@
 #define BLE_UPLOAD_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef02"
 #define BLE_COMMIT_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef03"
 #define BLE_STATUS_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef04"
-#define BLE_MOTION_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef05"
 #define BLE_PROTO_UUID        "5550eec9-b00f-4444-9876-ab12cd34ef06"
 
 static constexpr uint8_t PAYLOAD_VER_MIN = 1;
-static constexpr uint8_t PAYLOAD_VER_MAX = 5;
+static constexpr uint8_t PAYLOAD_VER_MAX = 6;
 
 static constexpr uint8_t MAX_UPLOADED_FRAMES = 16;
 
@@ -387,13 +389,8 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
 // changes (frame indices are payload-specific).
 static MotionConfig motionCfg = { 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
 
-#define MOTION_PATH "/motion.bin"
-static constexpr size_t MOTION_CFG_LEN = 16;
-
-static volatile uint8_t motionCfgPending[MOTION_CFG_LEN];
-static volatile bool motionCfgWritten = false;
-static bool motionPersistPending = false;
-static bool motionClearPending = false;
+static constexpr uint32_t MOTION_BLOCK_OFF = 8;
+static constexpr uint32_t MOTION_BLOCK_LEN = 16;
 
 static inline bool motionOn() { return motionCfg.enabled && uploadedActive; }
 
@@ -1119,13 +1116,11 @@ static void parseMotionCfg(const uint8_t* p, MotionConfig& c) {
   c.bg         = (uint16_t)p[14] | ((uint16_t)p[15] << 8);
 }
 
-// Strict validation against the active image. Any inconsistency rejects the
-// whole config — nothing is silently collapsed or defaulted.
-static bool motionCfgValid(const MotionConfig& c) {
+// Strict validation against a payload with n frames. Any inconsistency
+// rejects the whole config — nothing is silently collapsed or defaulted.
+static bool motionCfgValid(const MotionConfig& c, uint16_t n) {
   if (c.speed == 0) return false;
   if (!c.enabled) return true;         // frame fields unused when disabled
-  if (!uploadedActive) return false;
-  const uint16_t n = uploadedFrameCount;
   if (c.mainStart >= n) return false;
   if (c.mainStart == 0 && c.loopStart != 0) return false;  // intro needs entry
   if (c.loopStart < c.mainStart || c.loopStart >= n) return false;
@@ -1138,70 +1133,16 @@ static bool motionCfgValid(const MotionConfig& c) {
   return true;
 }
 
-// Adopt a validated config and restart the presentation. Returns false (and
-// changes nothing) if the config no longer validates: the receive-time check
-// runs in the BLE task, and a commit may swap the image before loop() gets
-// here, so the precondition must be re-checked at adoption time.
-static bool applyMotionCfg(const uint8_t* p) {
-  MotionConfig c;
-  parseMotionCfg(p, c);
-  if (!motionCfgValid(c)) return false;
-  motionCfg = c;
-  applyActiveSource();
-
-  uint32_t now = millis();
-  fillScreen(motionCfg.bg);
-  lastFrameTime = now;
-  motionLastMs = now;
-  if (motionOn()) {
-    // Start hidden; seed the handling timer so the sprite walks in right
-    // away (config apply and deep-sleep wake both imply the user is there).
-    motionPhase = PH_GAP;
-    gapReadyMs = now;
-    lastHandledMs = now;
+// Adopt the presentation config carried by the active payload (v6); older
+// payloads and the built-in default play as a plain loop. The payload was
+// validated at commit/load time, motion block included.
+static void adoptPayloadMotion() {
+  if (uploadedActive && upVer >= 6) {
+    parseMotionCfg(&uploadBuf[MOTION_BLOCK_OFF], motionCfg);
   } else {
-    animReset();
-    drawFrameRotated(frameBuf, currentBin, 0);
+    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
   }
-  return true;
-}
-
-static bool persistMotionCfg() {
-  if (!LittleFS.begin(true)) return false;
-  File f = LittleFS.open(MOTION_PATH, "w");
-  if (!f) return false;
-  uint8_t b[MOTION_CFG_LEN] = {
-    motionCfg.enabled,
-    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
-    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
-    (uint8_t)motionCfg.shakeStart, (uint8_t)(motionCfg.shakeStart >> 8),
-    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
-    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
-    motionCfg.speed,
-    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
-    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
-  };
-  size_t n = f.write(b, MOTION_CFG_LEN);
-  f.close();
-  return n == MOTION_CFG_LEN;
-}
-
-static bool clearPersistedMotionCfg() {
-  if (!LittleFS.begin(true)) return false;
-  if (!LittleFS.exists(MOTION_PATH)) return true;
-  return LittleFS.remove(MOTION_PATH);
-}
-
-// Restore the persisted motion config (after the image itself was restored).
-static void loadMotionCfg() {
-  if (!uploadedActive) return;
-  if (!LittleFS.begin(true)) return;
-  File f = LittleFS.open(MOTION_PATH, "r");
-  if (!f) return;
-  uint8_t b[MOTION_CFG_LEN];
-  bool ok = (f.read(b, MOTION_CFG_LEN) == MOTION_CFG_LEN);
-  f.close();
-  if (!ok || !applyMotionCfg(b)) LittleFS.remove(MOTION_PATH);
+  applyActiveSource();
 }
 
 // Begin the walk-out. When the exit reuses frames that are not currently
@@ -1358,24 +1299,6 @@ static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
 
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pStatusChar = nullptr;
-static BLECharacteristic* pMotionChar = nullptr;
-
-// Reflect the currently applied config in the readable Motion characteristic.
-static void publishMotionCfg() {
-  if (!pMotionChar) return;
-  uint8_t b[MOTION_CFG_LEN] = {
-    motionCfg.enabled,
-    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
-    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
-    (uint8_t)motionCfg.shakeStart, (uint8_t)(motionCfg.shakeStart >> 8),
-    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
-    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
-    motionCfg.speed,
-    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
-    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
-  };
-  pMotionChar->setValue(b, MOTION_CFG_LEN);
-}
 
 static void setStatus(uint8_t s) {
   uploadStatus = s;
@@ -1385,7 +1308,6 @@ static void setStatus(uint8_t s) {
     pStatusChar->notify();
   }
 }
-
 static bool validateUpload() {
   if (uploadPos < 4) return false;
   if (uploadBuf[0] != 'P' || uploadBuf[1] != 'P') return false;
@@ -1409,7 +1331,7 @@ static bool validateUpload() {
     if (bpp == 0) bpp = 4;
     if (bpp != 4 && bpp != 8) return false;
     palOff = 8;
-  } else if (ver >= 3 && ver <= 5) {  // diff chain (v4: +RLE, v5: +ref diff)
+  } else if (ver >= 3 && ver <= 6) {  // diff chain (v4 +RLE, v5 +ref, v6 +motion)
     if (uploadPos < 8) return false;
     n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
     if (n == 0) return false;
@@ -1417,7 +1339,13 @@ static bool validateUpload() {
     if (size != 64 && size != 120 && size != 128) return false;
     bpp = uploadBuf[6];
     if (bpp != 4 && bpp != 8) return false;
-    palOff = 8;
+    palOff = (ver >= 6) ? (MOTION_BLOCK_OFF + MOTION_BLOCK_LEN) : 8;
+    if (ver >= 6) {
+      if (uploadPos < palOff) return false;
+      MotionConfig mc;
+      parseMotionCfg(&uploadBuf[MOTION_BLOCK_OFF], mc);
+      if (!motionCfgValid(mc, n)) return false;
+    }
   } else {
     return false;
   }
@@ -1640,24 +1568,6 @@ class UploadCB : public BLECharacteristicCallbacks {
   }
 };
 
-class MotionCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override {
-    auto v = c->getValue();
-    if (v.length() != MOTION_CFG_LEN) {
-      setStatus(STATUS_ERROR);   // wrong-protocol write
-      return;
-    }
-    MotionConfig cfg;
-    parseMotionCfg((const uint8_t*)v.c_str(), cfg);
-    if (!motionCfgValid(cfg)) {
-      setStatus(STATUS_ERROR);   // reject the whole config at receive time
-      return;
-    }
-    memcpy((void*)motionCfgPending, v.c_str(), MOTION_CFG_LEN);
-    motionCfgWritten = true;     // adopted (display restart) in loop()
-  }
-};
-
 class CommitCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
     auto v = c->getValue();
@@ -1720,15 +1630,9 @@ static void bleSetup() {
   uint8_t s0 = STATUS_IDLE;
   pStatusChar->setValue(&s0, 1);
 
-  pMotionChar = pService->createCharacteristic(
-    BLE_MOTION_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
-  pMotionChar->setCallbacks(new MotionCB());
-  publishMotionCfg();
-
   BLECharacteristic* pProto = pService->createCharacteristic(
     BLE_PROTO_UUID, BLECharacteristic::PROPERTY_READ);
-  uint8_t proto[4] = { PAYLOAD_VER_MAX, PAYLOAD_VER_MIN, MOTION_CFG_LEN, 0 };
+  uint8_t proto[4] = { PAYLOAD_VER_MAX, PAYLOAD_VER_MIN, 0, 0 };
   pProto->setValue(proto, 4);
 
   pService->start();
@@ -1787,16 +1691,21 @@ void setup() {
   // Surfaces filesystem / corruption errors via a colored splash.
   LoadResult lr = loadPersistedImage();
   showLoadError(lr);
-  loadMotionCfg();
+  adoptPayloadMotion();
 
   bleSetup();
 
-  if (!motionOn()) {
+  if (motionOn()) {
+    // Start hidden with the handling timer seeded, so the sprite walks in
+    // immediately after the wake-by-motion.
+    motionPhase = PH_GAP;
+    gapReadyMs = millis();
+    lastHandledMs = millis();
+    motionLastMs = millis();
+  } else {
     animReset();
     drawFrameRotated(frameBuf, currentBin, 0);
   }
-  // else: applyMotionCfg() already primed PH_GAP with the handling timer
-  // seeded, so the sprite walks in immediately after the wake-by-motion.
 }
 
 void loop() {
@@ -1821,28 +1730,19 @@ void loop() {
   // uploader re-sends it after a commit if the user wants motion.
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
-    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
-    motionCfgWritten = false;   // pending write targeted the previous payload
-    motionClearPending = true;
-    publishMotionCfg();
-    applyActiveSource();
+    adoptPayloadMotion();
     lastFrameTime = now;
-    fillScreen(0x0000);  // clear stale pixels outside the new output window
-    animReset();
-    drawFrameRotated(frameBuf, currentBin, 0);
-  }
-
-  // Apply a pending motion config write (deferred from the BLE callback so
-  // validation sees a settled image state, after any commit above).
-  if (motionCfgWritten) {
-    motionCfgWritten = false;
-    uint8_t b[MOTION_CFG_LEN];
-    memcpy(b, (const void*)motionCfgPending, MOTION_CFG_LEN);
-    if (applyMotionCfg(b)) {
-      publishMotionCfg();
-      motionPersistPending = true;
+    motionLastMs = now;
+    fillScreen(motionCfg.bg);  // clear stale pixels outside the new window
+    if (motionOn()) {
+      // Start hidden; seed the handling timer so the sprite walks in right
+      // away (a fresh commit implies the user is present).
+      motionPhase = PH_GAP;
+      gapReadyMs = now;
+      lastHandledMs = now;
     } else {
-      setStatus(STATUS_ERROR);
+      animReset();
+      drawFrameRotated(frameBuf, currentBin, 0);
     }
   }
 
@@ -1855,14 +1755,6 @@ void loop() {
   if (clearPersistRequested) {
     clearPersistRequested = false;
     if (!clearPersistedImage()) setStatus(STATUS_ERROR);
-  }
-  if (motionPersistPending) {
-    motionPersistPending = false;
-    if (!persistMotionCfg()) setStatus(STATUS_ERROR);
-  }
-  if (motionClearPending) {
-    motionClearPending = false;
-    if (!clearPersistedMotionCfg()) setStatus(STATUS_ERROR);
   }
 
   // Update lowpass on raw gravity vector. Blend factor is dt/tau so the

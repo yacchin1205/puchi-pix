@@ -203,11 +203,13 @@
     const UPLOAD  = '5550eec9-b00f-4444-9876-ab12cd34ef02';
     const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
-    const MOTION  = '5550eec9-b00f-4444-9876-ab12cd34ef05';
     const PROTO   = '5550eec9-b00f-4444-9876-ab12cd34ef06';
 
     // ---- Image format constants (must match firmware) ----
-    // Payload v5: 8B header (magic, version=5, N uint16 LE, size, bpp, reserved)
+    // Payload v6: 8B header (magic, version=6, N uint16 LE, size, bpp,
+    // reserved) + 16B motion block [enabled, mainStart u16, loopStart u16,
+    // shakeStart u16, outStart u16, exitStart u16, speed, gap u16, bg565
+    // u16, all LE, frame values 0-based payload-relative]
     // + palette (16 or 256 x uint16 RGB565) + per-frame records:
     //   uint16 duration_ms + uint8 flags (bit0 = keyframe, bit1 = ref diff)
     //   keyframe: uint16 rleLen + PackBits RLE of pixels[W*H*bpp/8]
@@ -221,8 +223,8 @@
     // No fixed frame cap; the whole payload must fit the firmware buffer.
     const UPLOAD_BUF = 98368;
     const CHUNK_SIZE  = 200;                 // BLE write chunk
-    const PAYLOAD_VERSION = 5;               // version this tool emits
-    const MOTION_CFG_BYTES = 16;             // motion config wire length
+    const PAYLOAD_VERSION = 6;               // version this tool emits
+    const MOTION_BLOCK_BYTES = 16;           // embedded motion block length
 
     // ---- Localization (browser language: ja -> Japanese, else English) ----
     const I18N = {
@@ -273,14 +275,12 @@
         shOnLabel: 'Shake', segShake: 'Shake',
         segTIn: 'Intro', segTOut: 'Outro',
         segEntry: 'Entry', segMain: 'Main', segExit: 'Exit',
-        logMotionSent: (on, s) => on ? `motion config sent (main starts at frame ${s})` : 'motion config sent (disabled)',
-        logMotionError: m => `motion config error: ${m}`,
         logSegNoRoom: name => `${name}: no room to add this segment`,
         logProtoMissing: 'Firmware is too old for this tool (no protocol info); update the firmware. Upload disabled.',
-        logProtoMismatch: (dmax, dmin, dlen) =>
-          `Protocol mismatch: firmware supports payload v${dmin}-v${dmax} / motion ${dlen} B, ` +
-          `this tool emits payload v${PAYLOAD_VERSION} / motion ${MOTION_CFG_BYTES} B. ` +
-          'Update the firmware (or use a matching tool). Upload disabled.',
+        logProtoMismatch: (dmax, dmin) =>
+          `Protocol mismatch: firmware supports payload v${dmin}-v${dmax}, ` +
+          `this tool emits v${PAYLOAD_VERSION}. Update the firmware ` +
+          '(or use a matching tool). Upload disabled.',
       },
       ja: {
         connectBtn: '接続', disconnectBtn: '切断',
@@ -329,13 +329,11 @@
         shOnLabel: 'シェイク', segShake: 'シェイク',
         segTIn: '中割', segTOut: '中割',
         segEntry: '入場', segMain: 'メイン', segExit: '退場',
-        logMotionSent: (on, s) => on ? `移動設定を送信しました (メイン開始: フレーム${s})` : '移動設定を送信しました (無効)',
-        logMotionError: m => `移動設定エラー: ${m}`,
         logSegNoRoom: name => `${name}: 空きがないため追加できません`,
         logProtoMissing: 'ファームウェアが古く、このツールと互換性がありません(プロトコル情報なし)。ファームウェアを更新してください。アップロードは無効です。',
-        logProtoMismatch: (dmax, dmin, dlen) =>
-          `プロトコル不一致: ファーム側はペイロード v${dmin}〜v${dmax} / 移動設定 ${dlen} B、` +
-          `このツールはペイロード v${PAYLOAD_VERSION} / 移動設定 ${MOTION_CFG_BYTES} B です。` +
+        logProtoMismatch: (dmax, dmin) =>
+          `プロトコル不一致: ファーム側はペイロード v${dmin}〜v${dmax}、` +
+          `このツールは v${PAYLOAD_VERSION} です。` +
           'ファームウェアを更新してください。アップロードは無効です。',
       },
     };
@@ -396,7 +394,7 @@
     }
 
     // ---- BLE state ----
-    let device, server, uploadChar, commitChar, statusChar, motionChar;
+    let device, server, uploadChar, commitChar, statusChar;
     let compatible = false;   // set per connection after the protocol check
     let payload = null;
     let lastComposed = null;  // {composed: [{delay, imageData}], W, H} — for rebuild on size change
@@ -428,32 +426,15 @@
         try {
           const protoChar = await service.getCharacteristic(PROTO);
           const pv = await protoChar.readValue();
-          const dmax = pv.getUint8(0), dmin = pv.getUint8(1), dlen = pv.getUint8(2);
-          if (PAYLOAD_VERSION >= dmin && PAYLOAD_VERSION <= dmax &&
-              dlen === MOTION_CFG_BYTES) {
+          const dmax = pv.getUint8(0), dmin = pv.getUint8(1);
+          if (PAYLOAD_VERSION >= dmin && PAYLOAD_VERSION <= dmax) {
             compatible = true;
           } else {
-            log(T.logProtoMismatch(dmax, dmin, dlen));
+            log(T.logProtoMismatch(dmax, dmin));
           }
         } catch (_) {
           log(T.logProtoMissing);
         }
-        // Older firmware has no Motion characteristic; degrade gracefully.
-        motionChar = null;
-        try {
-          motionChar = await service.getCharacteristic(MOTION);
-          const v = await motionChar.readValue();
-          if (v.byteLength >= 16 && v.getUint8(0)) {
-            // Frame numbers are payload-specific and reset per loaded file,
-            // so only the scalar settings are restored here. The loop
-            // checkbox stays locked until a multi-frame file is loaded.
-            if (!$('m-loop').disabled) $('m-loop').checked = false;
-            $('m-speed').value = v.getUint8(11);
-            $('m-gap').value = v.getUint16(12, true);
-            $('bg').value = c565ToHex(v.getUint16(14, true));
-            updateMotionVis();
-          }
-        } catch (_) {}
         await statusChar.startNotifications();
         statusChar.addEventListener('characteristicvaluechanged', (e) => {
           const v = e.target.value.getUint8(0);
@@ -475,7 +456,7 @@
     // ---- Filmstrip timeline (video-trim style) ----
     // All user-visible frame numbers are 1-based GIF frames; the payload
     // range rides in the hidden f-start/f-end inputs and the BLE wire
-    // values (0-based, payload-relative) are derived in sendMotion().
+    // values (0-based, payload-relative) are derived in motionBlock().
     // Below the thumbnails sits a segment bar with labeled colored bands
     // (entry / intro / main / outro / exit, gray = trimmed) and draggable
     // handles: trim
@@ -632,6 +613,7 @@
       }
       syncMarkerInputs();
       updateStrip();
+      updatePayloadMotion();
     };
 
     let dragKind = null;
@@ -805,9 +787,11 @@
         rebuild();
       }
       updateStrip();
+      updatePayloadMotion();
     };
     // (no eager call: the HTML defaults already match simple-loop mode, and
-    // pvStop below is not yet initialized during module evaluation)
+    // pvStop / updatePayloadMotion are not yet initialized during module
+    // evaluation)
     $('m-loop').addEventListener('change', updateMotionVis);
 
     const resetFrameRange = (n) => {
@@ -1163,9 +1147,6 @@
         const t1 = performance.now();
         log(T.logUploaded(((t1 - t0) / 1000).toFixed(2)));
         await commitChar.writeValueWithResponse(new Uint8Array([0x01]));
-        // Commit resets the device-side motion config, so the settings ride
-        // along with every upload (including bg for the walk backdrop).
-        if (motionChar) await sendMotion();
       } catch (e) {
         log(T.logUploadError(e.message));
       } finally {
@@ -1173,30 +1154,18 @@
       }
     });
 
-    // ---- Motion config ----
-    // 16 bytes: [enabled, mainStart LE u16, loopStart LE u16, shakeStart
-    // LE u16, outStart LE u16, exitStart LE u16, speed px/s, gap LE u16 ms,
-    // bg RGB565 LE u16],
-    // all frame values 0-based relative to the trimmed payload (see the
-    // firmware header for segment semantics and sentinels). Sent
-    // automatically after each commit (a commit resets the device-side
-    // config). The firmware validates the frame numbers against the
-    // committed frame count and collapses out-of-range segments.
+    // ---- Motion block (embedded in the payload at bytes 8..23) ----
+    // Derived from the timeline state; frame values are 0-based relative to
+    // the trimmed payload. The firmware validates the block as part of
+    // commit, so an accepted upload always carries a consistent config.
     const hexTo565 = (h) => {
       const n = parseInt(h.slice(1), 16);
       return ((((n >> 16) & 0xFF) >> 3) << 11) |
              ((((n >> 8) & 0xFF) >> 2) << 5) |
              ((n & 0xFF) >> 3);
     };
-    const c565ToHex = (c) => {
-      const r5 = (c >> 11) & 0x1F, g6 = (c >> 5) & 0x3F, b5 = c & 0x1F;
-      const r = (r5 << 3) | (r5 >> 2);
-      const g = (g6 << 2) | (g6 >> 4);
-      const b = (b5 << 3) | (b5 >> 2);
-      return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
-    };
 
-    const sendMotion = async () => {
+    const motionBlock = () => {
       const s = stripState;
       const on = motionEnabled() ? 1 : 0;
       const start = Math.max(0, s.m - s.rs);
@@ -1206,10 +1175,8 @@
       const exit = s.x ? (s.x - s.rs) : 0;
       const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
       const gap = Math.min(Math.max($('m-gap').value | 0, 0), 65535);
-      $('m-speed').value = speed;
-      $('m-gap').value = gap;
       const bg = hexTo565($('bg').value);
-      const b = new Uint8Array([
+      return Uint8Array.from([
         on,
         start & 0xFF, start >> 8,
         loop & 0xFF, loop >> 8,
@@ -1220,16 +1187,15 @@
         gap & 0xFF, gap >> 8,
         bg & 0xFF, bg >> 8,
       ]);
-      // The firmware validates at receive time and rejects invalid configs
-      // outright (surfaced via the Status notification), so a successful
-      // write means "applied exactly as sent".
-      try {
-        await motionChar.writeValueWithResponse(b);
-        log(T.logMotionSent(on, start));
-      } catch (e) {
-        log(T.logMotionError(e.message));
-      }
     };
+
+    // The block sits at a fixed offset and does not affect the frame data,
+    // so marker / speed / gap edits patch it in place without re-encoding.
+    const updatePayloadMotion = () => {
+      if (payload) payload.set(motionBlock(), 8);
+    };
+    $('m-speed').addEventListener('change', updatePayloadMotion);
+    $('m-gap').addEventListener('change', updatePayloadMotion);
 
     // ---- Disconnect ----
     $('disconnect').addEventListener('click', () => {
@@ -1483,7 +1449,8 @@
       const recSize = r => 3 + (r.full ? 2 + r.full.length
         : (r.ref !== undefined ? 2 : 0) +
           1 + r.rects.reduce((a, rc) => a + 6 + rc.rle.length, 0));
-      const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
+      const total = 8 + MOTION_BLOCK_BYTES + palBytes +
+        records.reduce((a, r) => a + recSize(r), 0);
       if (total > UPLOAD_BUF) {
         throw new Error(T.errTooBig(total, UPLOAD_BUF, N, size, K));
       }
@@ -1497,13 +1464,14 @@
       out[5] = size;
       out[6] = bpp;
       out[7] = 0;             // reserved
+      out.set(motionBlock(), 8);
       for (let i = 0; i < K; i++) {
         const [r, g, b] = palette[i];
         const c565 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-        out[8 + i * 2]     = c565 & 0xFF;
-        out[8 + i * 2 + 1] = (c565 >> 8) & 0xFF;
+        out[24 + i * 2]     = c565 & 0xFF;
+        out[24 + i * 2 + 1] = (c565 >> 8) & 0xFF;
       }
-      let off = 8 + palBytes;
+      let off = 24 + palBytes;
       for (const r of records) {
         out[off++] = r.dur & 0xFF;
         out[off++] = (r.dur >> 8) & 0xFF;
