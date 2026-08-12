@@ -959,8 +959,13 @@ static void displayOff() {
 }
 
 // ---- Timeouts ----
+// DIM/SLEEP drive the classic inactivity timer, used when no presentation
+// state machine is running (plain loop / built-in icon). With a motion
+// payload the phases are the authority instead: GAP dims immediately and
+// deep sleeps after GAP_SLEEP_MS (see the display-power block in loop()).
 static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
 static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
+static constexpr uint32_t GAP_SLEEP_MS     = 10000;
 
 // ---- State ----
 static uint16_t curFrame = 0;
@@ -1094,6 +1099,7 @@ static MotionPhase motionPhase = PH_GAP;
 static int32_t motionPosMpx = 0;    // sprite offset, milli-source-px, + = right
 static uint32_t motionLastMs = 0;   // last position integration time
 static uint32_t gapReadyMs = 0;     // earliest allowed re-entry
+static uint32_t gapEnteredMs = 0;   // GAP entry time, drives GAP_SLEEP_MS
 static int16_t lastWalkShift = 0;
 
 static inline bool handledRecently(uint32_t now) {
@@ -1241,6 +1247,7 @@ static void runMotion(uint32_t now, bool binChanged) {
       } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
         motionPhase = PH_GAP;
         gapReadyMs = now + motionCfg.gapMs;
+        gapEnteredMs = now;
         fillScreen(motionCfg.bg);
         return;
       }
@@ -1760,6 +1767,7 @@ void setup() {
     // immediately after the wake-by-motion.
     motionPhase = PH_GAP;
     gapReadyMs = millis();
+    gapEnteredMs = millis();
     lastHandledMs = millis();
     motionLastMs = millis();
   } else {
@@ -1790,19 +1798,31 @@ void loop() {
   }
 #endif
 
-  // Suppress sleep timer while a host is connected or a transfer is mid-flight.
-  if (bleConnected || uploadStatus == STATUS_RECEIVING) {
-    lastActivityMs = now;
+  // Display power. With a motion payload the presentation state machine is
+  // the authority: active phases run at full brightness however long they
+  // take, and GAP (exit finished = absence confirmed) dims immediately and
+  // deep sleeps after GAP_SLEEP_MS. Without a state machine the classic
+  // inactivity timer decides. A connected host or an in-flight transfer
+  // suppresses sleep in both modes.
+  bool busy = bleConnected || uploadStatus == STATUS_RECEIVING;
+  if (busy) lastActivityMs = now;
+  bool dim;
+  bool sleepNow;
+  if (motionOn()) {
+    bool gap = (motionPhase == PH_GAP);
+    dim = gap;
+    sleepNow = gap && !busy && (now - gapEnteredMs >= GAP_SLEEP_MS);
+  } else {
+    uint32_t elapsed = now - lastActivityMs;
+    dim = (elapsed >= DIM_TIMEOUT_MS);
+    sleepNow = (elapsed >= SLEEP_TIMEOUT_MS);
   }
-  uint32_t elapsed = now - lastActivityMs;
-
-  if (elapsed >= SLEEP_TIMEOUT_MS) {
+  if (sleepNow) {
     displayOff();
     clearLatchedInterrupt();
     esp_deep_sleep_start();
   }
-
-  analogWrite(TFT_BL, (elapsed >= DIM_TIMEOUT_MS) ? 40 : 255);
+  analogWrite(TFT_BL, dim ? 40 : 255);
 
   // Apply pending image source switch (commit or revert). The motion config
   // indexes frames of the previous payload, so it is cleared here; the
@@ -1818,6 +1838,7 @@ void loop() {
       // away (a fresh commit implies the user is present).
       motionPhase = PH_GAP;
       gapReadyMs = now;
+      gapEnteredMs = now;
       lastHandledMs = now;
     } else {
       animReset();
