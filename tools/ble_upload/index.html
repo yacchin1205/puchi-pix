@@ -59,6 +59,61 @@
       border-radius: 4px;
       margin-bottom: 1em;
     }
+    #pv { border-radius: 50%; }
+    #strip-scroll { overflow-x: auto; padding: 0 8px 4px 8px; }
+    #strip { display: flex; gap: 4px; }
+    /* Cell geometry: canvas 40px + 1px border each side = 42px box, plus the
+       4px flex gap -> 46px pitch. The segment bar math (CELL) relies on it. */
+    .thumb { width: 42px; text-align: center; font-size: 10px; color: #666; }
+    .thumb canvas {
+      display: block;
+      width: 40px; height: 40px;
+      border: 1px solid #ccc;
+      image-rendering: pixelated;
+      background: #000;
+    }
+    .thumb.out { opacity: 0.35; }
+    #segbar { position: relative; height: 26px; margin-top: 2px; }
+    .band {
+      position: absolute;
+      top: 3px;
+      height: 20px;
+      border-radius: 3px;
+      font-size: 11px;
+      color: #fff;
+      text-align: center;
+      line-height: 20px;
+      overflow: hidden;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .band.trim { background: #ddd; }
+    .band.entry { background: #4a90d9; }
+    .band.tin, .band.tout { background: #8f77c9; }
+    .band.main { background: #3cb371; }
+    .band.exit { background: #e8963c; }
+    .handle {
+      position: absolute;
+      top: 0;
+      width: 14px;
+      height: 26px;
+      background: #fff;
+      border: 1px solid #666;
+      border-radius: 4px;
+      cursor: ew-resize;
+      touch-action: none;
+      z-index: 2;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+    }
+    .handle::after {
+      content: '';
+      position: absolute;
+      left: 5px; top: 5px;
+      width: 2px; height: 14px;
+      background: #888;
+    }
+    .thumb.playing canvas { border-color: #e33; box-shadow: 0 0 0 2px #e33; }
+    .band.playing { outline: 2px solid #222; outline-offset: 1px; }
   </style>
 </head>
 <body>
@@ -67,6 +122,7 @@
   <div class="row">
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
+    <button id="revert" disabled>Revert to default</button>
     <span id="conn-status" class="pill">未接続</span>
     <span id="upload-status" class="pill">idle</span>
   </div>
@@ -85,16 +141,6 @@
       <option value="256">256色 (8bit)</option>
     </select>
     <button id="upload" disabled>Upload</button>
-    <button id="revert" disabled>Revert to default</button>
-  </div>
-
-  <div class="row" id="range-row" hidden>
-    <label><span id="range-label">フレーム範囲</span>
-      <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
-      –
-      <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
-    </label>
-    <span id="f-total" class="pill"></span>
   </div>
 
   <div class="panel">
@@ -105,6 +151,43 @@
     <div>
       <p id="prev-label">Quantized (1st frame preview)</p>
       <canvas id="prev" width="128" height="128"></canvas>
+    </div>
+    <div>
+      <p id="pv-label">プレビュー</p>
+      <canvas id="pv" width="240" height="240"></canvas>
+    </div>
+  </div>
+
+  <!-- Hidden range state (1-based GIF frames), kept in sync by the
+       filmstrip UI and read by the payload builder. -->
+  <div class="row" id="range-row" hidden>
+    <label hidden><span id="range-label">フレーム範囲</span>
+      <input type="number" id="f-start" min="1" value="1" style="width: 4.5em">
+      –
+      <input type="number" id="f-end" min="1" value="1" style="width: 4.5em">
+    </label>
+  </div>
+
+  <div class="row">
+    <label><input type="checkbox" id="m-loop" checked disabled> <span id="m-loop-label">単純ループ</span></label>
+    <label id="m-speed-wrap" hidden><span id="m-speed-label">移動速度 (px/s)</span>
+      <input type="number" id="m-speed" min="1" max="255" value="60" style="width: 4.5em"></label>
+    <label id="m-gap-wrap" hidden><span id="m-gap-label">退場後の間 (ms)</span>
+      <input type="number" id="m-gap" min="0" max="65535" value="1000" style="width: 5.5em"></label>
+  </div>
+
+  <div id="strip-row" hidden>
+    <div class="row" style="gap: 6px; margin-bottom: 0.4em">
+      <label><input type="checkbox" id="e-on" checked> <span id="e-on-label">入場</span></label>
+      <label><input type="checkbox" id="ti-on"> <span id="ti-on-label">中割(前)</span></label>
+      <label><input type="checkbox" id="to-on"> <span id="to-on-label">中割(後)</span></label>
+      <label><input type="checkbox" id="x-on"> <span id="x-on-label">退場</span></label>
+      <button id="strip-reset">初期状態に戻す</button>
+      <button id="pv-play">再生</button>
+    </div>
+    <div id="strip-scroll">
+      <div id="strip"></div>
+      <div id="segbar"></div>
     </div>
   </div>
 
@@ -118,13 +201,17 @@
     const UPLOAD  = '5550eec9-b00f-4444-9876-ab12cd34ef02';
     const COMMIT  = '5550eec9-b00f-4444-9876-ab12cd34ef03';
     const STATUS  = '5550eec9-b00f-4444-9876-ab12cd34ef04';
+    const MOTION  = '5550eec9-b00f-4444-9876-ab12cd34ef05';
 
     // ---- Image format constants (must match firmware) ----
-    // Payload v3: 8B header (magic, version=3, N uint16 LE, size, bpp, reserved)
+    // Payload v4: 8B header (magic, version=4, N uint16 LE, size, bpp, reserved)
     // + palette (16 or 256 x uint16 RGB565) + per-frame records:
     //   uint16 duration_ms + uint8 flags (bit0 = keyframe)
-    //   keyframe: full pixels[W*H*bpp/8]
-    //   diff:     uint8 rectCount + rects { x, y, w, h + pixels vs prev frame }
+    //   keyframe: uint16 rleLen + PackBits RLE of pixels[W*H*bpp/8]
+    //   diff:     uint8 rectCount + rects { x, y, w, h, uint16 rleLen +
+    //             PackBits RLE of the rect's packed pixels vs prev frame }
+    // PackBits: control c < 128 = copy next c+1 bytes; c > 128 = repeat next
+    // byte 257-c times. 4bpp data is RLE'd on the packed bytes.
     // No fixed frame cap; the whole payload must fit the firmware buffer.
     const UPLOAD_BUF = 98368;
     const CHUNK_SIZE  = 200;                 // BLE write chunk
@@ -139,7 +226,7 @@
         sizeAuto: 'Auto size', size128: '128×128 (outer 4px hidden)',
         colors16: '16 colors (4bit)', colors256: '256 colors (8bit)',
         upload: 'Upload', revert: 'Revert to default',
-        rangeLabel: 'Frame range', totalFrames: n => `${n} frames total`,
+        rangeLabel: 'Frame range',
         origLabel: 'Original (1st frame)',
         prevLabelInitial: 'Quantized (1st frame preview)',
         prevLabel: (s, k) => `Quantized ${s}×${s}, ${k} colors (1st frame preview)`,
@@ -166,6 +253,17 @@
         logDisconnecting: 'disconnecting...',
         logRevert: 'revert to default',
         logRevertError: m => `revert error: ${m}`,
+        revertConfirm: 'Revert the device image to the built-in default? The uploaded animation will be removed.',
+        loopLabel: 'Simple loop',
+        mSpeedLabel: 'Walk speed (px/s)', mGapLabel: 'Gap after exit (ms)',
+        stripReset: 'Reset markers',
+        pvLabel: 'Preview', pvPlay: 'Play', pvStop: 'Stop',
+        eOnLabel: 'Entry', xOnLabel: 'Exit',
+        tiOnLabel: 'Intro', toOnLabel: 'Outro',
+        segTIn: 'Intro', segTOut: 'Outro',
+        segEntry: 'Entry', segMain: 'Main', segExit: 'Exit',
+        logMotionSent: (on, s) => on ? `motion config sent (main starts at frame ${s})` : 'motion config sent (disabled)',
+        logMotionError: m => `motion config error: ${m}`,
       },
       ja: {
         connectBtn: '接続', disconnectBtn: '切断',
@@ -175,7 +273,7 @@
         sizeAuto: 'サイズ自動', size128: '128×128 (端4pxは表示外)',
         colors16: '16色 (4bit)', colors256: '256色 (8bit)',
         upload: 'アップロード', revert: 'デフォルトに戻す',
-        rangeLabel: 'フレーム範囲', totalFrames: n => `全${n}フレーム`,
+        rangeLabel: 'フレーム範囲',
         origLabel: '元画像 (先頭フレーム)',
         prevLabelInitial: '量子化 (先頭フレームプレビュー)',
         prevLabel: (s, k) => `量子化 ${s}×${s} ${k}色 (先頭フレームプレビュー)`,
@@ -202,6 +300,17 @@
         logDisconnecting: '切断しています...',
         logRevert: 'デフォルトに戻します',
         logRevertError: m => `リバートエラー: ${m}`,
+        revertConfirm: '本体の画像を内蔵デフォルトに戻します。アップロード済みのアニメーションは削除されます。よろしいですか?',
+        loopLabel: '単純ループ',
+        mSpeedLabel: '移動速度 (px/s)', mGapLabel: '退場後の間 (ms)',
+        stripReset: '初期状態に戻す',
+        pvLabel: 'プレビュー', pvPlay: '再生', pvStop: '停止',
+        eOnLabel: '入場', xOnLabel: '退場',
+        tiOnLabel: '中割(前)', toOnLabel: '中割(後)',
+        segTIn: '中割', segTOut: '中割',
+        segEntry: '入場', segMain: 'メイン', segExit: '退場',
+        logMotionSent: (on, s) => on ? `移動設定を送信しました (メイン開始: フレーム${s})` : '移動設定を送信しました (無効)',
+        logMotionError: m => `移動設定エラー: ${m}`,
       },
     };
     const LANG = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
@@ -241,6 +350,16 @@
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
     $('prev-label').textContent = T.prevLabelInitial;
+    $('pv-label').textContent = T.pvLabel;
+    $('pv-play').textContent = T.pvPlay;
+    $('m-loop-label').textContent = T.loopLabel;
+    $('m-speed-label').textContent = T.mSpeedLabel;
+    $('m-gap-label').textContent = T.mGapLabel;
+    $('strip-reset').textContent = T.stripReset;
+    $('e-on-label').textContent = T.eOnLabel;
+    $('ti-on-label').textContent = T.tiOnLabel;
+    $('to-on-label').textContent = T.toOnLabel;
+    $('x-on-label').textContent = T.xOnLabel;
 
     if (!navigator.bluetooth) {
       const div = document.createElement('div');
@@ -250,7 +369,7 @@
     }
 
     // ---- BLE state ----
-    let device, server, uploadChar, commitChar, statusChar;
+    let device, server, uploadChar, commitChar, statusChar, motionChar;
     let payload = null;
     let lastComposed = null;  // {composed: [{delay, imageData}], W, H} — for rebuild on size change
 
@@ -274,6 +393,22 @@
         uploadChar = await service.getCharacteristic(UPLOAD);
         commitChar = await service.getCharacteristic(COMMIT);
         statusChar = await service.getCharacteristic(STATUS);
+        // Older firmware has no Motion characteristic; degrade gracefully.
+        motionChar = null;
+        try {
+          motionChar = await service.getCharacteristic(MOTION);
+          const v = await motionChar.readValue();
+          if (v.byteLength >= 14 && v.getUint8(0)) {
+            // Frame numbers are payload-specific and reset per loaded file,
+            // so only the scalar settings are restored here. The loop
+            // checkbox stays locked until a multi-frame file is loaded.
+            if (!$('m-loop').disabled) $('m-loop').checked = false;
+            $('m-speed').value = v.getUint8(9);
+            $('m-gap').value = v.getUint16(10, true);
+            $('bg').value = c565ToHex(v.getUint16(12, true));
+            updateMotionVis();
+          }
+        } catch (_) {}
         await statusChar.startNotifications();
         statusChar.addEventListener('characteristicvaluechanged', (e) => {
           const v = e.target.value.getUint8(0);
@@ -292,13 +427,535 @@
       }
     });
 
-    // ---- Frame range selection ----
-    const resetFrameRange = (n) => {
-      $('range-row').hidden = (n <= 1);
-      $('f-start').max = n; $('f-start').value = 1;
-      $('f-end').max = n;   $('f-end').value = n;
-      $('f-total').textContent = T.totalFrames(n);
+    // ---- Filmstrip timeline (video-trim style) ----
+    // All user-visible frame numbers are 1-based GIF frames; the payload
+    // range rides in the hidden f-start/f-end inputs and the BLE wire
+    // values (0-based, payload-relative) are derived in sendMotion().
+    // Below the thumbnails sits a segment bar with labeled colored bands
+    // (entry / intro / main / outro / exit, gray = trimmed) and draggable
+    // handles: trim
+    // handles at both ends plus the segment dividers. Boundary coordinate
+    // b = number of frames left of the boundary (0..n).
+    // Markers (abs 1-based GIF frames): rs/re = range, m = entry end (=intro
+    // start), l = loop start (l == m -> no intro), o = outro start (null =
+    // none), x = exit start (null = reuse entry).
+    const stripState = { n: 0, rs: 1, re: 1, m: 2, l: 2, o: null, x: null };
+    const CELL = 46;   // thumb box 42px (canvas 40 + 1px borders) + 4px gap
+    let segEls = null;
+    let pvFrames = [];   // full-size composed frame canvases, for the preview
+
+    const syncMarkerInputs = () => {
+      const s = stripState;
+      $('f-start').value = s.rs;
+      $('f-end').value = s.re;
     };
+
+    const motionEnabled = () => !$('m-loop').checked;
+
+    const buildStrip = () => {
+      const strip = $('strip');
+      strip.innerHTML = '';
+      strip.style.width = (stripState.n * CELL - 4) + 'px';
+      pvFrames = [];
+      for (let i = 1; i <= stripState.n; i++) {
+        const d = document.createElement('div');
+        d.className = 'thumb';
+        const { imageData } = lastComposed.composed[i - 1];
+        const t = document.createElement('canvas');
+        t.width = imageData.width; t.height = imageData.height;
+        t.getContext('2d').putImageData(imageData, 0, 0);
+        pvFrames[i - 1] = t;
+        const c = document.createElement('canvas');
+        c.width = 40; c.height = 40;
+        const ctx = c.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(t, 0, 0, 40, 40);
+        const label = document.createElement('div');
+        label.textContent = i;
+        d.appendChild(c);
+        d.appendChild(label);
+        strip.appendChild(d);
+      }
+      buildSegbar();
+    };
+
+    // Persistent band/handle elements: they are moved, never recreated, so
+    // pointer capture survives for the whole drag.
+    const buildSegbar = () => {
+      const bar = $('segbar');
+      bar.innerHTML = '';
+      segEls = {};
+      for (const [key, cls, label] of [
+        ['btrimL', 'band trim', ''],
+        ['bentry', 'band entry', T.segEntry],
+        ['btin', 'band tin', T.segTIn],
+        ['bmain', 'band main', T.segMain],
+        ['btout', 'band tout', T.segTOut],
+        ['bexit', 'band exit', T.segExit],
+        ['btrimR', 'band trim', ''],
+      ]) {
+        const d = document.createElement('div');
+        d.className = cls;
+        d.textContent = label;
+        bar.appendChild(d);
+        segEls[key] = d;
+      }
+      for (const kind of ['trimL', 'divM', 'divL', 'divO', 'divX', 'trimR']) {
+        const h = document.createElement('div');
+        h.className = 'handle';
+        h.dataset.kind = kind;
+        bar.appendChild(h);
+        segEls[kind] = h;
+      }
+    };
+
+    const updateStrip = () => {
+      const { n, rs, re, m, l, o, x } = stripState;
+      [...$('strip').children].forEach((d, idx) => {
+        const i = idx + 1;
+        d.classList.toggle('out', i < rs || i > re);
+      });
+      if (!segEls) return;
+      $('segbar').style.width = (n * CELL - 4) + 'px';
+      const place = (el, a, b) => {       // frames a..b inclusive
+        if (b < a) { el.style.display = 'none'; return; }
+        el.style.display = '';
+        el.style.left = ((a - 1) * CELL) + 'px';
+        el.style.width = ((b - a + 1) * CELL - 4) + 'px';
+      };
+      const loopLast = o ? o - 1 : (x ? x - 1 : re);
+      place(segEls.btrimL, 1, rs - 1);
+      place(segEls.bentry, rs, m - 1);
+      place(segEls.btin, m, l - 1);
+      place(segEls.bmain, l, loopLast);
+      if (o) place(segEls.btout, o, x ? x - 1 : re);
+      else segEls.btout.style.display = 'none';
+      if (x) place(segEls.bexit, x, re);
+      else segEls.bexit.style.display = 'none';
+      place(segEls.btrimR, re + 1, n);
+      // Handle box = 14px width + 1px borders = 16px; centering its midpoint
+      // (left + 8) on the boundary gap center (b*CELL - 2) gives -10.
+      const placeHandle = (el, b, show = true) => {
+        el.style.display = show ? '' : 'none';
+        el.style.left = (b * CELL - 10) + 'px';
+      };
+      placeHandle(segEls.trimL, rs - 1);
+      placeHandle(segEls.divM, m - 1, m > rs);
+      placeHandle(segEls.divL, l - 1, l > m);
+      placeHandle(segEls.divO, o ? o - 1 : 0, !!o);
+      placeHandle(segEls.divX, x ? x - 1 : 0, !!x);
+      placeHandle(segEls.trimR, re);
+      // Reflect segment existence (drag-off removal / normalize drops too)
+      $('e-on').checked = (m > rs);
+      $('ti-on').checked = (l > m);
+      $('to-on').checked = !!o;
+      $('x-on').checked = !!x;
+    };
+
+    // Clamp chain shared by every mutation, driven purely by marker values
+    // (checkboxes are re-synced from the result in updateStrip). Segments
+    // that no longer fit collapse to "absent": m == rs -> no entry,
+    // l == m -> no intro, o/x null -> no outro/exit. The main loop always
+    // keeps at least one frame.
+    const normalizeMarkers = () => {
+      const s = stripState;
+      if (s.re > s.rs && s.m > s.rs) {
+        s.m = Math.min(Math.max(s.m, s.rs + 1), s.re);
+      } else {
+        s.m = s.rs;
+      }
+      if (s.m > s.rs && s.l > s.m) {
+        s.l = Math.min(Math.max(s.l, s.m + 1), s.re);
+      } else {
+        s.l = s.m;
+      }
+      if (s.x !== null && !(s.x > s.l && s.x <= s.re)) s.x = null;
+      if (s.o !== null) {
+        const hi = s.x ? s.x - 1 : s.re;
+        if (!(s.o > s.l && s.o <= hi)) s.o = null;
+      }
+      syncMarkerInputs();
+      updateStrip();
+    };
+
+    let dragKind = null;
+    let dragRangeBefore = null;
+    const applyBoundary = (kind, b) => {
+      const s = stripState;
+      const clampI = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+      switch (kind) {
+        case 'trimL': s.rs = Math.min(b + 1, s.re); break;
+        case 'trimR': s.re = Math.max(b, s.rs); break;
+        case 'divM': {
+          // Without an intro the loop divider follows the entry divider.
+          const hadIntro = s.l > s.m;
+          s.m = clampI(b + 1, s.rs + 1, hadIntro ? s.l - 1 : s.re);
+          if (!hadIntro) s.l = s.m;
+          break;
+        }
+        case 'divL':
+          s.l = clampI(b + 1, s.m + 1, s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re));
+          break;
+        case 'divO':
+          s.o = clampI(b + 1, s.l + 1, s.x ? s.x - 1 : s.re);
+          break;
+        case 'divX':
+          if (b >= s.re) s.x = null;     // dragged off the end -> no exit
+          else s.x = clampI(b + 1, (s.o ? s.o : s.l) + 1, s.re);
+          break;
+      }
+      normalizeMarkers();
+    };
+    $('segbar').addEventListener('pointerdown', (e) => {
+      const kind = e.target.dataset && e.target.dataset.kind;
+      if (!kind) return;
+      dragKind = kind;
+      dragRangeBefore = `${stripState.rs},${stripState.re}`;
+      e.target.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    $('segbar').addEventListener('pointermove', (e) => {
+      if (!dragKind) return;
+      const rect = $('segbar').getBoundingClientRect();
+      const b = Math.max(0, Math.min(stripState.n,
+        Math.round((e.clientX - rect.left) / CELL)));
+      applyBoundary(dragKind, b);
+    });
+    const endDrag = () => {
+      if (!dragKind) return;
+      dragKind = null;
+      if (`${stripState.rs},${stripState.re}` !== dragRangeBefore) rebuild();
+    };
+    $('segbar').addEventListener('pointerup', endDrag);
+    $('segbar').addEventListener('pointercancel', endDrag);
+
+    $('e-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('e-on').checked) {
+        if (s.re <= s.rs) {              // no room for entry + main
+          $('e-on').checked = false;
+          return;
+        }
+        s.m = s.rs + 1;
+      } else {
+        s.m = s.rs;                      // normalize collapses the intro too
+      }
+      normalizeMarkers();
+    });
+
+    $('ti-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('ti-on').checked) {
+        if (s.m <= s.rs || s.re <= s.m) {  // needs an entry and a loop frame
+          $('ti-on').checked = false;
+          return;
+        }
+        s.l = s.m + 1;
+      } else {
+        s.l = s.m;
+      }
+      normalizeMarkers();
+    });
+
+    $('to-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('to-on').checked) {
+        const cand = s.x ? s.x - 1 : s.re;  // one frame just before exit/end
+        if (cand <= s.l) {
+          $('to-on').checked = false;
+          return;
+        }
+        s.o = cand;
+      } else {
+        s.o = null;
+      }
+      normalizeMarkers();
+    });
+
+    $('x-on').addEventListener('change', () => {
+      const s = stripState;
+      if ($('x-on').checked) {
+        if (s.re <= s.l) {               // no room after the loop at all
+          $('x-on').checked = false;
+          return;
+        }
+        // Default to a 1-frame exit at the end. An outro sitting on the last
+        // frame steps back one to make room (dropped when that leaves it
+        // without room of its own).
+        if (s.o && s.o >= s.re) {
+          s.o = (s.re - 1 > s.l) ? s.re - 1 : null;
+        }
+        s.x = s.re;
+      } else {
+        s.x = null;
+      }
+      normalizeMarkers();
+    });
+
+    $('strip-reset').addEventListener('click', () => {
+      const s = stripState;
+      const rangeBefore = `${s.rs},${s.re}`;
+      s.rs = 1;
+      s.re = s.n;
+      s.m = Math.min(2, s.n);
+      s.l = s.m;
+      s.o = null;
+      s.x = null;
+      normalizeMarkers();
+      if (`${s.rs},${s.re}` !== rangeBefore) rebuild();
+    });
+
+    // Simple loop (default) hides the filmstrip and every motion-specific
+    // setting; unchecking it reveals them. Returning to simple loop resets
+    // the range to all frames so no invisible trim stays applied.
+    const updateMotionVis = () => {
+      const on = motionEnabled();
+      $('strip-row').hidden = !on || stripState.n <= 1;
+      $('m-speed-wrap').hidden = !on;
+      $('m-gap-wrap').hidden = !on;
+      if (!on) pvStop();   // play/stop lives on the (now hidden) timeline
+      if (!on && stripState.n > 1 &&
+          (stripState.rs !== 1 || stripState.re !== stripState.n)) {
+        stripState.rs = 1;
+        stripState.re = stripState.n;
+        syncMarkerInputs();
+        rebuild();
+      }
+      updateStrip();
+    };
+    // (no eager call: the HTML defaults already match simple-loop mode, and
+    // pvStop below is not yet initialized during module evaluation)
+    $('m-loop').addEventListener('change', updateMotionVis);
+
+    const resetFrameRange = (n) => {
+      pvStop();
+      // Motion needs at least 2 frames; until a usable file is loaded the
+      // simple-loop checkbox stays locked in its default state.
+      $('m-loop').disabled = (n <= 1);
+      if (n <= 1) $('m-loop').checked = true;
+      $('f-start').max = n;
+      $('f-end').max = n;
+      stripState.n = n;
+      stripState.rs = 1;
+      stripState.re = n;
+      stripState.m = Math.min(2, n);
+      stripState.l = stripState.m;
+      stripState.o = null;
+      stripState.x = null;
+      syncMarkerInputs();
+      updateMotionVis();
+    };
+
+    // ---- Timeline preview ----
+    // Plays the segment sequence the firmware would run (entry walk-in ->
+    // intro once -> main loop -> outro once -> exit walk-out -> gap), while
+    // highlighting the current frame and its segment band on the timeline.
+    // The main loop runs 2 passes standing in for "while handled". The round
+    // canvas mirrors the device: 240px disc, bg fill, 2x sprite scale.
+    const pvState = {
+      running: false, phase: 'gap', frame: 1, frameDue: 0,
+      pos: 0, gapUntil: 0, passes: 0, last: 0, raf: 0,
+    };
+
+    const pvDur = (f) => {
+      let d = lastComposed.composed[f - 1].delay | 0;
+      if (d < 20) d = 100;
+      if (d > 65535) d = 65535;
+      return d;
+    };
+
+    const pvSegs = () => {
+      const s = stripState;
+      const loopLast = s.o ? s.o - 1 : (s.x ? s.x - 1 : s.re);
+      const loop = [s.l, loopLast];
+      const entry = s.m > s.rs ? [s.rs, s.m - 1] : null;
+      return {
+        loop,
+        enter: entry || loop,
+        intro: s.l > s.m ? [s.m, s.l - 1] : null,
+        outro: s.o ? [s.o, s.x ? s.x - 1 : s.re] : null,
+        exit: s.x ? [s.x, s.re] : (entry || loop),
+      };
+    };
+
+    const pvSpriteSize = () => {
+      const sel = $('size').value;
+      const { W, H } = lastComposed;
+      return (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
+    };
+
+    const pvHighlight = (f) => {
+      [...$('strip').children].forEach((d, idx) =>
+        d.classList.toggle('playing', f === idx + 1));
+      if (!segEls) return;
+      const s = stripState;
+      let key = null;
+      if (f !== null && f >= s.rs && f <= s.re) {
+        if (f < s.m) key = 'bentry';
+        else if (f < s.l) key = 'btin';
+        else if (s.x && f >= s.x) key = 'bexit';
+        else if (s.o && f >= s.o) key = 'btout';
+        else key = 'bmain';
+      }
+      for (const k of ['bentry', 'btin', 'bmain', 'btout', 'bexit']) {
+        segEls[k].classList.toggle('playing', k === key);
+      }
+    };
+
+    const pvDraw = () => {
+      const ctx = $('pv').getContext('2d');
+      ctx.fillStyle = $('bg').value;
+      ctx.fillRect(0, 0, 240, 240);
+      if (pvState.phase === 'gap') {
+        pvHighlight(null);
+        return;
+      }
+      const f = Math.min(Math.max(pvState.frame, 1), stripState.n);
+      const spr = pvSpriteSize() * 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(120, 120, 120, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(pvFrames[f - 1],
+        Math.round(120 - spr / 2 + pvState.pos * 2), 120 - spr / 2, spr, spr);
+      ctx.restore();
+      pvHighlight(f);
+    };
+
+    const pvTick = (now) => {
+      if (!pvState.running) return;
+      const p = pvState;
+      const s = stripState;
+      const dt = Math.min(now - p.last, 100);
+      p.last = now;
+      const speed = Math.max($('m-speed').value | 0, 1);
+      const gap = Math.max($('m-gap').value | 0, 0);
+      const maxShift = (120 + pvSpriteSize() * 3 / 2) / 2 + 1;
+
+      if (!motionEnabled()) {
+        p.phase = 'main';
+        p.pos = 0;
+        if (now >= p.frameDue) {
+          p.frame = (p.frame >= s.re) ? s.rs : p.frame + 1;
+          p.frameDue = now + pvDur(p.frame);
+        }
+      } else {
+        const seg = pvSegs();
+        switch (p.phase) {
+          case 'gap':
+            if (now >= p.gapUntil) {
+              p.phase = 'enter';
+              p.pos = maxShift;
+              p.frame = seg.enter[0];
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'enter':
+            p.pos -= speed * dt / 1000;
+            if (now >= p.frameDue) {
+              p.frame = (p.frame >= seg.enter[1]) ? seg.enter[0] : p.frame + 1;
+              p.frameDue = now + pvDur(p.frame);
+            }
+            if (p.pos <= 0) {
+              p.pos = 0;
+              p.passes = 0;
+              if (s.m > s.rs) {
+                p.phase = seg.intro ? 'tin' : 'main';
+                p.frame = seg.intro ? seg.intro[0] : seg.loop[0];
+                p.frameDue = now + pvDur(p.frame);
+              } else {
+                p.phase = 'main';   // already playing the loop frames
+              }
+            }
+            break;
+          case 'tin':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.intro[1]) {
+                p.phase = 'main';
+                p.frame = seg.loop[0];
+                p.passes = 0;
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'main':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.loop[1]) {
+                p.passes++;
+                if (p.passes < 2) {
+                  p.frame = seg.loop[0];
+                } else if (seg.outro) {
+                  p.phase = 'tout';
+                  p.frame = seg.outro[0];
+                } else {
+                  p.phase = 'exit';
+                  p.pos = 0;
+                  p.frame = seg.exit[0];
+                }
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'tout':
+            if (now >= p.frameDue) {
+              if (p.frame >= seg.outro[1]) {
+                p.phase = 'exit';
+                p.pos = 0;
+                p.frame = seg.exit[0];
+              } else {
+                p.frame++;
+              }
+              p.frameDue = now + pvDur(p.frame);
+            }
+            break;
+          case 'exit':
+            p.pos -= speed * dt / 1000;
+            if (now >= p.frameDue) {
+              p.frame = (p.frame >= seg.exit[1]) ? seg.exit[0] : p.frame + 1;
+              p.frameDue = now + pvDur(p.frame);
+            }
+            if (p.pos <= -maxShift) {
+              p.phase = 'gap';
+              p.gapUntil = now + gap;
+            }
+            break;
+        }
+      }
+      pvDraw();
+      p.raf = requestAnimationFrame(pvTick);
+    };
+
+    const pvStart = () => {
+      if (!lastComposed) return;
+      pvState.running = true;
+      pvState.phase = 'gap';
+      pvState.gapUntil = 0;
+      pvState.pos = 0;
+      pvState.frame = stripState.rs;
+      pvState.frameDue = 0;
+      pvState.passes = 0;
+      pvState.last = performance.now();
+      $('pv-play').textContent = T.pvStop;
+      pvState.raf = requestAnimationFrame(pvTick);
+    };
+
+    const pvStop = () => {
+      if (pvState.raf) cancelAnimationFrame(pvState.raf);
+      pvState.running = false;
+      pvState.phase = 'gap';
+      $('pv-play').textContent = T.pvPlay;
+      pvHighlight(null);
+    };
+
+    $('pv-play').addEventListener('click', () => {
+      if (pvState.running) pvStop();
+      else pvStart();
+    });
 
     // Read the selected range as [start, end] (1-based, inclusive), clamped
     // to [1, n] and normalized so start <= end; writes clamps back to the UI.
@@ -319,6 +976,8 @@
       try {
         lastComposed = await fileToComposed(lastFile);
         if (resetRange) resetFrameRange(lastComposed.composed.length);
+        buildStrip();     // thumbnails follow bg-color recomposition too
+        updateStrip();
         payload = buildPayload(lastComposed);
         log(T.logBuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
         if (server && server.connected) $('upload').disabled = false;
@@ -372,12 +1031,67 @@
         const t1 = performance.now();
         log(T.logUploaded(((t1 - t0) / 1000).toFixed(2)));
         await commitChar.writeValueWithResponse(new Uint8Array([0x01]));
+        // Commit resets the device-side motion config, so the settings ride
+        // along with every upload (including bg for the walk backdrop).
+        if (motionChar) await sendMotion();
       } catch (e) {
         log(T.logUploadError(e.message));
       } finally {
         $('upload').disabled = false;
       }
     });
+
+    // ---- Motion config ----
+    // 14 bytes: [enabled, mainStart LE u16, loopStart LE u16, outStart LE
+    // u16, exitStart LE u16, speed px/s, gap LE u16 ms, bg RGB565 LE u16],
+    // all frame values 0-based relative to the trimmed payload (see the
+    // firmware header for segment semantics and sentinels). Sent
+    // automatically after each commit (a commit resets the device-side
+    // config). The firmware validates the frame numbers against the
+    // committed frame count and collapses out-of-range segments.
+    const hexTo565 = (h) => {
+      const n = parseInt(h.slice(1), 16);
+      return ((((n >> 16) & 0xFF) >> 3) << 11) |
+             ((((n >> 8) & 0xFF) >> 2) << 5) |
+             ((n & 0xFF) >> 3);
+    };
+    const c565ToHex = (c) => {
+      const r5 = (c >> 11) & 0x1F, g6 = (c >> 5) & 0x3F, b5 = c & 0x1F;
+      const r = (r5 << 3) | (r5 >> 2);
+      const g = (g6 << 2) | (g6 >> 4);
+      const b = (b5 << 3) | (b5 >> 2);
+      return '#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
+    };
+
+    const sendMotion = async () => {
+      const s = stripState;
+      const on = motionEnabled() ? 1 : 0;
+      const start = Math.max(0, s.m - s.rs);
+      const loop = Math.max(0, s.l - s.rs);
+      const out = s.o ? (s.o - s.rs) : 0;
+      const exit = s.x ? (s.x - s.rs) : 0;
+      const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
+      const gap = Math.min(Math.max($('m-gap').value | 0, 0), 65535);
+      $('m-speed').value = speed;
+      $('m-gap').value = gap;
+      const bg = hexTo565($('bg').value);
+      const b = new Uint8Array([
+        on,
+        start & 0xFF, start >> 8,
+        loop & 0xFF, loop >> 8,
+        out & 0xFF, out >> 8,
+        exit & 0xFF, exit >> 8,
+        speed,
+        gap & 0xFF, gap >> 8,
+        bg & 0xFF, bg >> 8,
+      ]);
+      try {
+        await motionChar.writeValueWithResponse(b);
+        log(T.logMotionSent(on, start));
+      } catch (e) {
+        log(T.logMotionError(e.message));
+      }
+    };
 
     // ---- Disconnect ----
     $('disconnect').addEventListener('click', () => {
@@ -390,6 +1104,7 @@
     // ---- Revert ----
     $('revert').addEventListener('click', async () => {
       if (!commitChar) return;
+      if (!window.confirm(T.revertConfirm)) return;
       log(T.logRevert);
       try {
         await commitChar.writeValueWithResponse(new Uint8Array([0x03]));
@@ -498,7 +1213,8 @@
       // Render preview of 1st packed frame
       drawPackedTo($('prev'), packed[0], palette, size, bpp);
 
-      // Per-frame records: keyframe when first or when the diff isn't smaller
+      // Per-frame records (RLE-compressed): keyframe when first or when the
+      // encoded diff isn't smaller than the encoded full frame.
       const frameBytes = size * size * bpp / 8;
       let keyframes = 0;
       const records = packed.map((cur, i) => {
@@ -507,20 +1223,22 @@
         let dur = composed[i].delay | 0;
         if (dur < 20) dur = 100;
         if (dur > 65535) dur = 65535;
+        const keyRle = rleEncode(cur);
         if (i > 0) {
           const rects = diffRects(packed[i - 1], cur, size, bpp);
-          const diffSize = 1 + rects.reduce((a, r) => a + 4 + r.data.length, 0);
-          if (diffSize < frameBytes) return { dur, rects };
+          for (const rc of rects) rc.rle = rleEncode(rc.data);
+          const diffSize = 1 + rects.reduce((a, rc) => a + 6 + rc.rle.length, 0);
+          if (diffSize < 2 + keyRle.length) return { dur, rects };
         }
         keyframes++;
-        return { dur, full: cur };
+        return { dur, full: keyRle };
       });
 
-      // Assemble payload (v3)
+      // Assemble payload (v4)
       const N = records.length;
       const palBytes = K * 2;
-      const recSize = r => 3 + (r.full ? frameBytes
-        : 1 + r.rects.reduce((a, rc) => a + 4 + rc.data.length, 0));
+      const recSize = r => 3 + (r.full ? 2 + r.full.length
+        : 1 + r.rects.reduce((a, rc) => a + 6 + rc.rle.length, 0));
       const total = 8 + palBytes + records.reduce((a, r) => a + recSize(r), 0);
       if (total > UPLOAD_BUF) {
         throw new Error(T.errTooBig(total, UPLOAD_BUF, N, size, K));
@@ -529,7 +1247,7 @@
       const out = new Uint8Array(total);
       out[0] = 0x50;          // 'P'
       out[1] = 0x50;          // 'P'
-      out[2] = 3;             // version
+      out[2] = 4;             // version
       out[3] = N & 0xFF;      // frame count (uint16 LE)
       out[4] = (N >> 8) & 0xFF;
       out[5] = size;
@@ -547,20 +1265,52 @@
         out[off++] = (r.dur >> 8) & 0xFF;
         out[off++] = r.full ? 1 : 0;   // flags: bit0 = keyframe
         if (r.full) {
+          out[off++] = r.full.length & 0xFF;
+          out[off++] = (r.full.length >> 8) & 0xFF;
           out.set(r.full, off);
-          off += frameBytes;
+          off += r.full.length;
         } else {
           out[off++] = r.rects.length;
           for (const rc of r.rects) {
             out[off++] = rc.x; out[off++] = rc.y;
             out[off++] = rc.w; out[off++] = rc.h;
-            out.set(rc.data, off);
-            off += rc.data.length;
+            out[off++] = rc.rle.length & 0xFF;
+            out[off++] = (rc.rle.length >> 8) & 0xFF;
+            out.set(rc.rle, off);
+            off += rc.rle.length;
           }
         }
       }
       log(T.logFrameStats(keyframes, N - keyframes, (total / N).toFixed(0), frameBytes + 3));
       return out;
+    }
+
+    // PackBits RLE encoder (see format notes above). Worst case grows the
+    // data by ~1/128 + 1 byte, so v4 is effectively never larger than v3.
+    function rleEncode(data) {
+      const out = [];
+      const n = data.length;
+      let i = 0;
+      while (i < n) {
+        let run = 1;
+        while (i + run < n && data[i + run] === data[i] && run < 128) run++;
+        if (run >= 3) {
+          out.push(257 - run, data[i]);
+          i += run;
+        } else {
+          let j = i, lit = 0;
+          while (j < n) {
+            let r = 1;
+            while (j + r < n && data[j + r] === data[j] && r < 128) r++;
+            if (r >= 3 || lit + r > 128) break;
+            j += r; lit += r;
+          }
+          out.push(lit - 1);
+          for (let k = i; k < j; k++) out.push(data[k]);
+          i = j;
+        }
+      }
+      return Uint8Array.from(out);
     }
 
     const unpackPixel = (p, i, bpp) =>
@@ -767,6 +1517,9 @@
       ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
       ctx.drawImage(tmp, 0, 0, targetCanvas.width, targetCanvas.height);
     }
+
+    // Debug/test hook: expose the current payload bytes
+    window._payload = () => payload;
   </script>
 </body>
 </html>

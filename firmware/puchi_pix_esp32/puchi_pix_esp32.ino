@@ -9,10 +9,31 @@
 //   Upload  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF02
 //   Commit  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF03
 //   Status  (Read/Notify): 5550EEC9-B00F-4444-9876-AB12CD34EF04
+//   Motion  (Read/Write):  5550EEC9-B00F-4444-9876-AB12CD34EF05
 //
 //   Upload: chunked writes appended in order to a 32 KB buffer.
 //   Commit: 0x01 = validate & swap, 0x02 = buffer reset, 0x03 = revert default.
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
+//   Motion: 14 bytes [enabled, mainStart lo/hi, loopStart lo/hi,
+//                     outStart lo/hi, exitStart lo/hi, speed, gap lo/hi,
+//                     bg565 lo/hi].
+//     Splits the uploaded animation into up to five segments:
+//       entry walk  [0, mainStart)         loops while walking in
+//       intro trans [mainStart, loopStart) plays once after arriving
+//       main loop   [loopStart, outStart | exitStart | N)
+//                                          loops while handling is detected
+//       outro trans [outStart, exitStart | N) plays once before leaving
+//       exit walk   [exitStart, N)         loops while walking out
+//     Sentinels: mainStart = 0 -> no entry walk (the main loop itself plays
+//     while walking in/out; intro is forced off). loopStart <= mainStart ->
+//     no intro. outStart = 0 -> no outro. exitStart = 0 -> exit reuses the
+//     entry walk frames (or the main loop when there is no entry).
+//     When enabled, the sprite walks in from the right translating at
+//     `speed` source px/s, then the screen stays empty for `gap` ms after
+//     the exit before the next entry. bg565 fills everything outside the
+//     sprite (RGB565), matching the uploader's compositing background.
+//     Cleared by image commit / revert; the uploader re-sends it after each
+//     upload. Persisted to /motion.bin.
 //
 // Payload (sent via Upload, raw bytes appended in order):
 //   v1 (64x64 fixed):
@@ -46,9 +67,17 @@
 //                       { rx, ry, rw, rh (uint8) + data[ceil(rw*rh*bpp/8)] }
 //             Diffs apply onto the previously composed frame; frame 0 must be
 //             a keyframe. Playback is sequential and wraps to frame 0.
+//   v4 (RLE diff chain): identical to v3 except every pixel-data block is
+//     PackBits RLE compressed and prefixed with its uint16 LE byte length:
+//     keyframe: uint16 rleLen + rle[rleLen]   (decodes to W*H*bpp/8 bytes)
+//     rect:     rx, ry, rw, rh, uint16 rleLen + rle[rleLen]
+//               (decodes to ceil(rw*rh*bpp/8) bytes)
+//     PackBits: control c < 128 = copy next c+1 bytes verbatim; c > 128 =
+//     repeat next byte (257 - c) times; c == 128 = no-op. 4bpp data is RLE'd
+//     on the packed bytes.
 //   v1/v2 frame count is additionally bounded by the upload buffer (98368 B):
 //   64x64 -> 16 frames either depth; 128x128 -> 12 (16-color) / 5 (256-color).
-//   v3 has no fixed frame cap; the payload just has to fit the buffer.
+//   v3/v4 have no fixed frame cap; the payload just has to fit the buffer.
 //
 // BLE is active only while awake. Deep-sleep entry stops the radio implicitly.
 //
@@ -73,6 +102,7 @@
 #define BLE_UPLOAD_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef02"
 #define BLE_COMMIT_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef03"
 #define BLE_STATUS_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef04"
+#define BLE_MOTION_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef05"
 
 static constexpr uint8_t MAX_UPLOADED_FRAMES = 16;
 
@@ -88,6 +118,16 @@ enum LoadResult : uint8_t {
   LOAD_NONE     = 1,  // no persisted image (first boot / after revert)
   LOAD_FS_FAIL  = 2,  // filesystem mount or read failure
   LOAD_INVALID  = 3,  // file exists but is corrupt / wrong format
+};
+
+// PackBits reader emitting one decoded byte per call (v4 payloads). The
+// stream is validated up front, so no bounds checks during decode. Declared
+// up here for the same auto-prototype reason as LoadResult.
+struct RleReader {
+  const uint8_t* p;
+  uint8_t runByte;
+  uint8_t runLeft;
+  uint8_t litLeft;
 };
 
 // ---- Pin assignments ----
@@ -304,10 +344,36 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-// Point the renderer at the active source's dimensions
+// ---- Motion (walk-in / walk-out) config ----
+// Set over BLE, persisted to /motion.bin, cleared whenever the image source
+// changes (frame indices are payload-specific).
+struct MotionConfig {
+  uint8_t  enabled;    // 0 = plain in-place loop (legacy behavior)
+  uint16_t mainStart;  // end of entry walk = start of intro; 0 = no entry
+  uint16_t loopStart;  // first frame of the main loop; <= mainStart = no intro
+  uint16_t outStart;   // first frame of the outro transition; 0 = none
+  uint16_t exitStart;  // first frame of the exit walk; 0 = reuse entry
+  uint8_t  speed;      // traverse speed, source px/s
+  uint16_t gapMs;      // empty-screen time after exit before re-entry
+  uint16_t bg;         // RGB565 fill outside the sprite / for empty screen
+};
+static MotionConfig motionCfg = { 0, 1, 0, 0, 0, 60, 1000, 0x0000 };
+
+#define MOTION_PATH "/motion.bin"
+static constexpr size_t MOTION_CFG_LEN = 14;
+
+static volatile uint8_t motionCfgPending[MOTION_CFG_LEN];
+static volatile bool motionCfgWritten = false;
+static bool motionPersistPending = false;
+static bool motionClearPending = false;
+
+static inline bool motionOn() { return motionCfg.enabled && uploadedActive; }
+
+// Point the renderer at the active source's dimensions. Motion needs the full
+// 240px window regardless of source size so the traverse path isn't cropped.
 static void applyActiveSource() {
   srcSize = uploadedActive ? upSize : IMG_W;
-  outSize = (srcSize >= 120) ? 240 : 192;
+  outSize = (srcSize >= 120 || motionOn()) ? 240 : 192;
 }
 
 // ---- Compose dispatchers ----
@@ -356,66 +422,149 @@ static void composeFrame(uint16_t frameIdx, uint16_t* buf) {
   else                composeFrameFromProgmem((uint8_t)frameIdx, buf);
 }
 
-// ---- v3 (diff chain) record helpers ----
+// ---- v3/v4 (diff chain) record helpers ----
 // Record offsets passed here are trusted: validateUpload() walks the full
-// record chain on commit and rejects any out-of-bounds rect or truncation.
+// record chain on commit and rejects any out-of-bounds rect, bad RLE stream
+// or truncation.
 
-static inline uint32_t v3FrameBytes() {
+static inline uint32_t chainFrameBytes() {
   return (uint32_t)upSize * upSize * upBpp / 8;
 }
 
-static inline uint32_t v3RectDataBytes(uint8_t rw, uint8_t rh) {
+static inline uint32_t chainRectDataBytes(uint8_t rw, uint8_t rh) {
   uint32_t px = (uint32_t)rw * rh;
   return (upBpp == 8) ? px : ((px + 1) >> 1);
 }
 
-static uint32_t v3NextRecord(uint32_t off) {
-  if (uploadBuf[off + 2] & 0x01) return off + 3 + v3FrameBytes();
-  uint8_t rectCount = uploadBuf[off + 3];
-  uint32_t p = off + 4;
-  for (uint8_t r = 0; r < rectCount; r++)
-    p += 4 + v3RectDataBytes(uploadBuf[p + 2], uploadBuf[p + 3]);
-  return p;
-}
-
-static uint16_t v3Duration(uint32_t off) {
+static inline uint16_t rdU16(uint32_t off) {
   return (uint16_t)uploadBuf[off] | ((uint16_t)uploadBuf[off + 1] << 8);
 }
 
+static inline void rleInit(RleReader& r, const uint8_t* p) {
+  r.p = p;
+  r.runLeft = 0;
+  r.litLeft = 0;
+}
+
+static uint8_t rleNextByte(RleReader& r) {
+  if (r.runLeft) { r.runLeft--; return r.runByte; }
+  if (r.litLeft) { r.litLeft--; return *r.p++; }
+  for (;;) {
+    uint8_t c = *r.p++;
+    if (c < 128) { r.litLeft = c; return *r.p++; }
+    if (c > 128) {
+      r.runByte = *r.p++;
+      r.runLeft = (uint8_t)(256 - c);   // total 257-c, one emitted now
+      return r.runByte;
+    }
+    // c == 128: no-op
+  }
+}
+
+// Verify a PackBits stream of `len` bytes decodes to exactly `expect` bytes.
+static bool rleCheck(const uint8_t* p, uint32_t len, uint32_t expect) {
+  const uint8_t* end = p + len;
+  uint32_t out = 0;
+  while (p < end) {
+    uint8_t c = *p++;
+    if (c < 128) {
+      uint32_t n = (uint32_t)c + 1;
+      if (p + n > end) return false;
+      p += n;
+      out += n;
+    } else if (c > 128) {
+      if (p >= end) return false;
+      p++;
+      out += 257 - c;
+    }
+  }
+  return out == expect;
+}
+
+static uint32_t chainNextRecord(uint32_t off) {
+  if (upVer >= 4) {
+    if (uploadBuf[off + 2] & 0x01) return off + 5 + rdU16(off + 3);
+    uint8_t rectCount = uploadBuf[off + 3];
+    uint32_t p = off + 4;
+    for (uint8_t r = 0; r < rectCount; r++)
+      p += 6 + rdU16(p + 4);
+    return p;
+  }
+  if (uploadBuf[off + 2] & 0x01) return off + 3 + chainFrameBytes();
+  uint8_t rectCount = uploadBuf[off + 3];
+  uint32_t p = off + 4;
+  for (uint8_t r = 0; r < rectCount; r++)
+    p += 4 + chainRectDataBytes(uploadBuf[p + 2], uploadBuf[p + 3]);
+  return p;
+}
+
+static uint16_t chainDuration(uint32_t off) {
+  return rdU16(off);
+}
+
 // Keyframe: full decode into buf. Diff: rect patches applied over buf, which
-// must still hold the previously composed frame.
-static void v3Decode(uint32_t off, uint16_t* buf) {
+// must still hold the previously composed frame. v4 reads pixel data through
+// the RLE reader; v3 reads it raw.
+static void chainDecode(uint32_t off, uint16_t* buf) {
   const uint16_t* pal = uploadedPalette();
+  const bool rle = (upVer >= 4);
   if (uploadBuf[off + 2] & 0x01) {
-    const uint8_t* data = &uploadBuf[off + 3];
     uint32_t n = (uint32_t)upSize * upSize;
-    if (upBpp == 8) {
-      for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+    if (rle) {
+      RleReader r;
+      rleInit(r, &uploadBuf[off + 5]);
+      uint8_t b = 0;
+      for (uint32_t i = 0; i < n; i++) {
+        if (upBpp == 8) buf[i] = pal[rleNextByte(r)];
+        else {
+          if (!(i & 1)) b = rleNextByte(r);
+          buf[i] = pal[(i & 1) ? (b & 0x0F) : (b >> 4)];
+        }
+      }
     } else {
-      for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
+      const uint8_t* data = &uploadBuf[off + 3];
+      if (upBpp == 8) {
+        for (uint32_t i = 0; i < n; i++) buf[i] = pal[data[i]];
+      } else {
+        for (uint32_t i = 0; i < n; i++) buf[i] = pal[read4bitRam(data, i)];
+      }
     }
     return;
   }
   uint8_t rectCount = uploadBuf[off + 3];
   uint32_t p = off + 4;
-  for (uint8_t r = 0; r < rectCount; r++) {
+  for (uint8_t rc = 0; rc < rectCount; rc++) {
     uint8_t rx = uploadBuf[p], ry = uploadBuf[p + 1];
     uint8_t rw = uploadBuf[p + 2], rh = uploadBuf[p + 3];
-    const uint8_t* data = &uploadBuf[p + 4];
+    const uint8_t* data = &uploadBuf[p + (rle ? 6 : 4)];
+    RleReader r;
+    if (rle) rleInit(r, data);
     uint32_t i = 0;
+    uint8_t b = 0;
     for (uint8_t dy = 0; dy < rh; dy++) {
       uint16_t* row = &buf[(uint32_t)(ry + dy) * upSize + rx];
-      for (uint8_t dx = 0; dx < rw; dx++, i++)
-        row[dx] = pal[(upBpp == 8) ? data[i] : read4bitRam(data, i)];
+      for (uint8_t dx = 0; dx < rw; dx++, i++) {
+        uint8_t v;
+        if (rle) {
+          if (upBpp == 8) v = rleNextByte(r);
+          else {
+            if (!(i & 1)) b = rleNextByte(r);
+            v = (i & 1) ? (b & 0x0F) : (b >> 4);
+          }
+        } else {
+          v = (upBpp == 8) ? data[i] : read4bitRam(data, i);
+        }
+        row[dx] = pal[v];
+      }
     }
-    p += 4 + v3RectDataBytes(rw, rh);
+    p += rle ? (6 + rdU16(p + 4)) : (4 + chainRectDataBytes(rw, rh));
   }
 }
 
 // Frame metadata accessors (dispatch source).
 static uint16_t getDuration(uint16_t idx) {
   if (uploadedActive) {
-    if (upVer == 3) return v3Duration(upCurRec);
+    if (upVer >= 3) return chainDuration(upCurRec);
     if (idx >= uploadedFrameCount) idx = 0;
     return uploadedFrameDuration(idx);
   }
@@ -432,7 +581,10 @@ static uint16_t getNextFrame(uint16_t idx) {
 }
 
 // Reverse-rotate source buffer onto a centered OUT_SIZE x OUT_SIZE region.
-static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
+// walkShift displaces the sprite along its own horizontal axis (source px,
+// positive = right); the axis rotates with the tilt bins, so the sprite
+// always walks perpendicular to gravity.
+static void drawFrameRotated(const uint16_t* src, uint8_t bin, int16_t walkShift) {
   const int32_t cosT = COS64[bin & 0x3F];
   const int32_t sinT = SIN64[bin & 0x3F];
 
@@ -443,6 +595,7 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
 
   const int8_t SHIFT = 15 + SCALE_SHIFT;
   const int16_t srcHalf = srcSize / 2;
+  const int16_t srcCX = srcHalf - walkShift;
   const uint16_t sz = srcSize;
 
   for (int16_t oy = 0; oy < outSize; oy++) {
@@ -451,13 +604,13 @@ static void drawFrameRotated(const uint16_t* src, uint8_t bin) {
     int32_t cyCos = cy * cosT;
     for (int16_t ox = 0; ox < outSize; ox++) {
       int32_t cx = ox - outHalf;
-      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + srcHalf;
+      int16_t sx = (int16_t)(((cx * cosT) + cySin) >> SHIFT) + srcCX;
       int16_t sy = (int16_t)(((-cx * sinT) + cyCos) >> SHIFT) + srcHalf;
       uint16_t c;
       if ((uint16_t)sx < sz && (uint16_t)sy < sz) {
         c = src[(uint32_t)sy * sz + sx];
       } else {
-        c = 0x0000;
+        c = motionCfg.bg;
       }
       txRowBuf[ox] = c;
     }
@@ -740,9 +893,9 @@ static uint32_t lastLpUpdateMs = 0;
 // Reset playback to frame 0 and compose it into frameBuf.
 static void animReset() {
   curFrame = 0;
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     upCurRec = upDataOff;
-    v3Decode(upCurRec, frameBuf);
+    chainDecode(upCurRec, frameBuf);
   } else {
     composeFrame(0, frameBuf);
   }
@@ -751,18 +904,307 @@ static void animReset() {
 // Advance to the next frame. frameBuf always holds the current composed
 // frame, so v3 only patches the diff rects; other sources recompose fully.
 static void animAdvance() {
-  if (uploadedActive && upVer == 3) {
+  if (uploadedActive && upVer >= 3) {
     if ((uint16_t)(curFrame + 1) < uploadedFrameCount) {
       curFrame++;
-      upCurRec = v3NextRecord(upCurRec);
+      upCurRec = chainNextRecord(upCurRec);
     } else {
       curFrame = 0;
       upCurRec = upDataOff;
     }
-    v3Decode(upCurRec, frameBuf);
+    chainDecode(upCurRec, frameBuf);
   } else {
     curFrame = getNextFrame(curFrame);
     composeFrame(curFrame, frameBuf);
+  }
+}
+
+// Compose an arbitrary frame into frameBuf. For v3 this replays the diff
+// chain from the nearest keyframe at or before the target (frame 0 is always
+// a keyframe, so this terminates). Walk segments are short, so the replay on
+// a segment jump costs a few small decodes at most.
+static void animJumpTo(uint16_t target) {
+  if (target >= uploadedFrameCount) target = 0;
+  if (uploadedActive && upVer >= 3) {
+    uint32_t off = upDataOff;
+    uint32_t keyOff = upDataOff;
+    uint16_t keyIdx = 0;
+    for (uint16_t i = 1; i <= target; i++) {
+      off = chainNextRecord(off);
+      if (uploadBuf[off + 2] & 0x01) { keyOff = off; keyIdx = i; }
+    }
+    upCurRec = keyOff;
+    chainDecode(upCurRec, frameBuf);
+    for (uint16_t i = keyIdx; i < target; i++) {
+      upCurRec = chainNextRecord(upCurRec);
+      chainDecode(upCurRec, frameBuf);
+    }
+  } else {
+    composeFrame(target, frameBuf);
+  }
+  curFrame = target;
+}
+
+// Advance within [first, last] (inclusive), wrapping back to first.
+static void animAdvanceRange(uint16_t first, uint16_t last) {
+  if (curFrame >= last) {
+    animJumpTo(first);
+    return;
+  }
+  if (uploadedActive && upVer >= 3) {
+    curFrame++;
+    upCurRec = chainNextRecord(upCurRec);
+    chainDecode(upCurRec, frameBuf);
+  } else {
+    curFrame++;
+    composeFrame(curFrame, frameBuf);
+  }
+}
+
+// ---- Motion (walk-in / walk-out) runtime ----
+
+// Device-handling detection: raw accel deviating from the 200 ms lowpass by
+// more than ~0.04 g (600 counts at 16384/g) on either axis counts as
+// handling; it is considered ongoing for HANDLE_HOLD_MS after the last hit.
+static constexpr int32_t HANDLE_THRESH = 600;
+static constexpr uint32_t HANDLE_HOLD_MS = 2000;
+static uint32_t lastHandledMs = 0;
+
+enum MotionPhase : uint8_t {
+  PH_GAP, PH_ENTER, PH_TRANS_IN, PH_MAIN, PH_TRANS_OUT, PH_EXIT
+};
+static MotionPhase motionPhase = PH_GAP;
+static int32_t motionPosMpx = 0;    // sprite offset, milli-source-px, + = right
+static uint32_t motionLastMs = 0;   // last position integration time
+static uint32_t gapReadyMs = 0;     // earliest allowed re-entry
+static int16_t lastWalkShift = 0;
+
+static inline bool handledRecently(uint32_t now) {
+  return (uint32_t)(now - lastHandledMs) < HANDLE_HOLD_MS;
+}
+
+// Offset at which the sprite is fully outside the output window even when
+// rotated 45deg (source half-diagonal ~= srcSize * 1.5 / 2 on screen).
+static inline int16_t motionMaxShift() {
+  return (int16_t)((outSize / 2 + (int16_t)srcSize * 3 / 2) / 2 + 1);
+}
+
+// Segment boundaries derived from the config (all inclusive last indices).
+// See the header comment for the five-segment layout and its sentinels.
+static inline bool hasEntrySeg() { return motionCfg.mainStart > 0; }
+static inline uint16_t loopFirstFrame() {
+  return (motionCfg.loopStart > motionCfg.mainStart) ? motionCfg.loopStart
+                                                     : motionCfg.mainStart;
+}
+static inline bool hasIntroSeg() { return loopFirstFrame() > motionCfg.mainStart; }
+static inline uint16_t loopLastFrame() {
+  if (motionCfg.outStart) return motionCfg.outStart - 1;
+  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
+                             : (uploadedFrameCount - 1);
+}
+static inline uint16_t outLastFrame() {
+  return motionCfg.exitStart ? (motionCfg.exitStart - 1)
+                             : (uploadedFrameCount - 1);
+}
+static inline uint16_t enterLastFrame() {
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : loopLastFrame();
+}
+static inline uint16_t exitFirstFrame() {
+  return motionCfg.exitStart ? motionCfg.exitStart : 0;
+}
+static inline uint16_t exitLastFrame() {
+  if (motionCfg.exitStart) return uploadedFrameCount - 1;
+  return hasEntrySeg() ? (motionCfg.mainStart - 1) : loopLastFrame();
+}
+
+// Validate and adopt a 14-byte motion config, then restart the presentation.
+// Out-of-range optional segments collapse to "absent" rather than rejecting
+// the whole config.
+static void applyMotionCfg(const uint8_t* p) {
+  MotionConfig c;
+  c.enabled   = p[0] ? 1 : 0;
+  c.mainStart = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
+  c.loopStart = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
+  c.outStart  = (uint16_t)p[5] | ((uint16_t)p[6] << 8);
+  c.exitStart = (uint16_t)p[7] | ((uint16_t)p[8] << 8);
+  c.speed     = p[9] ? p[9] : 60;
+  c.gapMs     = (uint16_t)p[10] | ((uint16_t)p[11] << 8);
+  c.bg        = (uint16_t)p[12] | ((uint16_t)p[13] << 8);
+  const uint16_t n = uploadedFrameCount;
+  if (c.enabled && (!uploadedActive || c.mainStart >= n)) c.enabled = 0;
+  if (c.mainStart == 0) c.loopStart = 0;              // intro needs an entry
+  if (c.loopStart <= c.mainStart || c.loopStart >= n) c.loopStart = c.mainStart;
+  if (c.exitStart && (c.exitStart <= c.loopStart || c.exitStart >= n)) {
+    c.exitStart = 0;
+  }
+  if (c.outStart &&
+      (c.outStart <= c.loopStart ||
+       c.outStart >= (c.exitStart ? c.exitStart : n))) {
+    c.outStart = 0;
+  }
+  motionCfg = c;
+  applyActiveSource();
+
+  uint32_t now = millis();
+  fillScreen(motionCfg.bg);
+  lastFrameTime = now;
+  motionLastMs = now;
+  if (motionOn()) {
+    // Start hidden; seed the handling timer so the sprite walks in right
+    // away (config apply and deep-sleep wake both imply the user is there).
+    motionPhase = PH_GAP;
+    gapReadyMs = now;
+    lastHandledMs = now;
+  } else {
+    animReset();
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+}
+
+static bool persistMotionCfg() {
+  if (!LittleFS.begin(true)) return false;
+  File f = LittleFS.open(MOTION_PATH, "w");
+  if (!f) return false;
+  uint8_t b[MOTION_CFG_LEN] = {
+    motionCfg.enabled,
+    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
+    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
+    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
+    motionCfg.speed,
+    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
+    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
+  };
+  size_t n = f.write(b, MOTION_CFG_LEN);
+  f.close();
+  return n == MOTION_CFG_LEN;
+}
+
+static void clearPersistedMotionCfg() {
+  if (!LittleFS.begin(true)) return;
+  if (LittleFS.exists(MOTION_PATH)) LittleFS.remove(MOTION_PATH);
+}
+
+// Restore the persisted motion config (after the image itself was restored).
+static void loadMotionCfg() {
+  if (!uploadedActive) return;
+  if (!LittleFS.begin(true)) return;
+  File f = LittleFS.open(MOTION_PATH, "r");
+  if (!f) return;
+  uint8_t b[MOTION_CFG_LEN];
+  bool ok = (f.read(b, MOTION_CFG_LEN) == MOTION_CFG_LEN);
+  f.close();
+  if (ok) applyMotionCfg(b);
+}
+
+// Begin the walk-out. When the exit reuses frames that are not currently
+// playing, the chain is replayed to the segment start; without entry and
+// exit segments the main loop simply keeps playing while translating.
+static void startExit() {
+  motionPhase = PH_EXIT;
+  motionPosMpx = 0;
+  if (motionCfg.exitStart || hasEntrySeg()) {
+    animJumpTo(exitFirstFrame());
+  }
+}
+
+// Per-loop motion driver: advances phase/position/frames and redraws when
+// the frame, tilt bin or walk offset changed.
+static void runMotion(uint32_t now, bool binChanged) {
+  bool redraw = binChanged;
+  int32_t dt = (int32_t)(now - motionLastMs);
+  motionLastMs = now;
+  const int32_t maxMpx = (int32_t)motionMaxShift() * 1000;
+
+  switch (motionPhase) {
+    case PH_GAP:
+      if (handledRecently(now) && (int32_t)(now - gapReadyMs) >= 0) {
+        motionPhase = PH_ENTER;
+        motionPosMpx = maxMpx;
+        animJumpTo(0);
+        lastFrameTime = now;
+        redraw = true;
+      }
+      break;
+
+    case PH_ENTER:
+    case PH_EXIT:
+      motionPosMpx -= (int32_t)motionCfg.speed * dt;
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (motionPhase == PH_ENTER) animAdvanceRange(0, enterLastFrame());
+        else                         animAdvanceRange(exitFirstFrame(), exitLastFrame());
+        redraw = true;
+      }
+      if (motionPhase == PH_ENTER && motionPosMpx <= 0) {
+        motionPosMpx = 0;
+        // Without an entry segment the main loop is already playing, so its
+        // frame position is kept instead of snapping back to the start.
+        if (hasEntrySeg()) {
+          if (hasIntroSeg()) {
+            motionPhase = PH_TRANS_IN;
+            animJumpTo(motionCfg.mainStart);
+          } else {
+            motionPhase = PH_MAIN;
+            animJumpTo(loopFirstFrame());
+          }
+          lastFrameTime = now;
+        } else {
+          motionPhase = PH_MAIN;
+        }
+        redraw = true;
+      } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
+        motionPhase = PH_GAP;
+        gapReadyMs = now + motionCfg.gapMs;
+        fillScreen(motionCfg.bg);
+        return;
+      }
+      break;
+
+    case PH_TRANS_IN:   // one-shot [mainStart, loopStart); ends inside the loop
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        animAdvanceRange(motionCfg.mainStart, loopLastFrame());
+        if (curFrame >= loopFirstFrame()) motionPhase = PH_MAIN;
+        redraw = true;
+      }
+      break;
+
+    case PH_MAIN:
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (curFrame >= loopLastFrame()) {
+          if (handledRecently(now)) {
+            animJumpTo(loopFirstFrame());      // keep looping while handled
+          } else if (motionCfg.outStart) {
+            motionPhase = PH_TRANS_OUT;
+            animAdvanceRange(motionCfg.outStart, outLastFrame());
+          } else {
+            startExit();
+          }
+        } else {
+          animAdvanceRange(loopFirstFrame(), loopLastFrame());
+        }
+        redraw = true;
+      }
+      break;
+
+    case PH_TRANS_OUT:  // one-shot [outStart, exitStart | N)
+      if (now - lastFrameTime >= getDuration(curFrame)) {
+        lastFrameTime = now;
+        if (curFrame >= outLastFrame()) startExit();
+        else animAdvanceRange(motionCfg.outStart, outLastFrame());
+        redraw = true;
+      }
+      break;
+  }
+
+  if (motionPhase == PH_GAP) return;
+  int16_t shift = (int16_t)(motionPosMpx / 1000);
+  if (shift != lastWalkShift) redraw = true;
+  if (redraw) {
+    lastWalkShift = shift;
+    drawFrameRotated(frameBuf, currentBin, shift);
   }
 }
 
@@ -786,6 +1228,23 @@ static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
 
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pStatusChar = nullptr;
+static BLECharacteristic* pMotionChar = nullptr;
+
+// Reflect the currently applied config in the readable Motion characteristic.
+static void publishMotionCfg() {
+  if (!pMotionChar) return;
+  uint8_t b[MOTION_CFG_LEN] = {
+    motionCfg.enabled,
+    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
+    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
+    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
+    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
+    motionCfg.speed,
+    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
+    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
+  };
+  pMotionChar->setValue(b, MOTION_CFG_LEN);
+}
 
 static void setStatus(uint8_t s) {
   uploadStatus = s;
@@ -819,7 +1278,7 @@ static bool validateUpload() {
     if (bpp == 0) bpp = 4;
     if (bpp != 4 && bpp != 8) return false;
     palOff = 8;
-  } else if (ver == 3) {    // diff chain: keyframes + rect patches
+  } else if (ver == 3 || ver == 4) {  // diff chain (v4: RLE pixel data)
     if (uploadPos < 8) return false;
     n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
     if (n == 0) return false;
@@ -835,27 +1294,45 @@ static bool validateUpload() {
   uint32_t palBytes = (bpp == 8) ? 512 : 32;
   uint32_t dataOff = palOff + palBytes;
 
-  if (ver == 3) {
-    // Walk every record; playback trusts these offsets and rect bounds.
+  if (ver >= 3) {
+    // Walk every record; playback trusts these offsets, rect bounds and
+    // (v4) RLE stream integrity.
     uint32_t frameBytes = (uint32_t)size * size * bpp / 8;
     uint32_t off = dataOff;
     for (uint16_t i = 0; i < n; i++) {
       if (off + 3 > uploadPos) return false;
       if (uploadBuf[off + 2] & 0x01) {
-        off += 3 + frameBytes;
+        if (ver >= 4) {
+          if (off + 5 > uploadPos) return false;
+          uint32_t rl = (uint32_t)uploadBuf[off + 3] | ((uint32_t)uploadBuf[off + 4] << 8);
+          if (off + 5 + rl > uploadPos) return false;
+          if (!rleCheck(&uploadBuf[off + 5], rl, frameBytes)) return false;
+          off += 5 + rl;
+        } else {
+          off += 3 + frameBytes;
+        }
       } else {
         if (i == 0) return false;  // frame 0 must be a keyframe
         if (off + 4 > uploadPos) return false;
         uint8_t rectCount = uploadBuf[off + 3];
         off += 4;
         for (uint8_t r = 0; r < rectCount; r++) {
-          if (off + 4 > uploadPos) return false;
+          uint32_t rectHdr = (ver >= 4) ? 6 : 4;
+          if (off + rectHdr > uploadPos) return false;
           uint8_t rw = uploadBuf[off + 2], rh = uploadBuf[off + 3];
           if (rw == 0 || rh == 0) return false;
           if ((uint16_t)uploadBuf[off] + rw > size) return false;
           if ((uint16_t)uploadBuf[off + 1] + rh > size) return false;
           uint32_t px = (uint32_t)rw * rh;
-          off += 4 + ((bpp == 8) ? px : ((px + 1) >> 1));
+          uint32_t raw = (bpp == 8) ? px : ((px + 1) >> 1);
+          if (ver >= 4) {
+            uint32_t rl = (uint32_t)uploadBuf[off + 4] | ((uint32_t)uploadBuf[off + 5] << 8);
+            if (off + 6 + rl > uploadPos) return false;
+            if (!rleCheck(&uploadBuf[off + 6], rl, raw)) return false;
+            off += 6 + rl;
+          } else {
+            off += 4 + raw;
+          }
         }
       }
       if (off > uploadPos) return false;
@@ -992,6 +1469,15 @@ class UploadCB : public BLECharacteristicCallbacks {
   }
 };
 
+class MotionCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    auto v = c->getValue();
+    if (v.length() < MOTION_CFG_LEN) return;
+    memcpy((void*)motionCfgPending, v.c_str(), MOTION_CFG_LEN);
+    motionCfgWritten = true;   // applied (and validated) in loop()
+  }
+};
+
 class CommitCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
     auto v = c->getValue();
@@ -1047,6 +1533,12 @@ static void bleSetup() {
   pStatusChar->addDescriptor(new BLE2902());
   uint8_t s0 = STATUS_IDLE;
   pStatusChar->setValue(&s0, 1);
+
+  pMotionChar = pService->createCharacteristic(
+    BLE_MOTION_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  pMotionChar->setCallbacks(new MotionCB());
+  publishMotionCfg();
 
   pService->start();
 
@@ -1104,11 +1596,16 @@ void setup() {
   // Surfaces filesystem / corruption errors via a colored splash.
   LoadResult lr = loadPersistedImage();
   showLoadError(lr);
+  loadMotionCfg();
 
   bleSetup();
 
-  animReset();
-  drawFrameRotated(frameBuf, currentBin);
+  if (!motionOn()) {
+    animReset();
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+  // else: applyMotionCfg() already primed PH_GAP with the handling timer
+  // seeded, so the sprite walks in immediately after the wake-by-motion.
 }
 
 void loop() {
@@ -1128,13 +1625,30 @@ void loop() {
 
   analogWrite(TFT_BL, (elapsed >= DIM_TIMEOUT_MS) ? 40 : 255);
 
-  // Apply pending image source switch (commit or revert).
+  // Apply pending image source switch (commit or revert). The motion config
+  // indexes frames of the previous payload, so it is cleared here; the
+  // uploader re-sends it after a commit if the user wants motion.
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
+    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 60, 1000, 0x0000 };
+    motionClearPending = true;
+    publishMotionCfg();
+    applyActiveSource();
     lastFrameTime = now;
     fillScreen(0x0000);  // clear stale pixels outside the new output window
     animReset();
-    drawFrameRotated(frameBuf, currentBin);
+    drawFrameRotated(frameBuf, currentBin, 0);
+  }
+
+  // Apply a pending motion config write (deferred from the BLE callback so
+  // validation sees a settled image state, after any commit above).
+  if (motionCfgWritten) {
+    motionCfgWritten = false;
+    uint8_t b[MOTION_CFG_LEN];
+    memcpy(b, (const void*)motionCfgPending, MOTION_CFG_LEN);
+    applyMotionCfg(b);
+    publishMotionCfg();
+    motionPersistPending = true;
   }
 
   // Apply pending persistence operations (deferred from BLE callbacks so the
@@ -1147,6 +1661,14 @@ void loop() {
     clearPersistRequested = false;
     clearPersistedImage();
   }
+  if (motionPersistPending) {
+    motionPersistPending = false;
+    persistMotionCfg();
+  }
+  if (motionClearPending) {
+    motionClearPending = false;
+    clearPersistedMotionCfg();
+  }
 
   // Update lowpass on raw gravity vector. Blend factor is dt/tau so the
   // effective time constant stays ~LP_TAU_MS whether the loop is spinning
@@ -1155,6 +1677,12 @@ void loop() {
   if (readXYZRaw(rx, ry, rz)) {
     int32_t fx = (int32_t)rx * ACCEL_X_SIGN;
     int32_t fy = (int32_t)ry * ACCEL_Y_SIGN;
+    // Handling detection: raw deviating from the lowpass = the device is
+    // being moved by hand. Counts as activity (keeps the display awake).
+    if (labs(fx - fxLp) > HANDLE_THRESH || labs(fy - fyLp) > HANDLE_THRESH) {
+      lastHandledMs = now;
+      lastActivityMs = now;
+    }
     int32_t dt = (int32_t)(now - lastLpUpdateMs);
     if (dt > 0) {
       if (dt > LP_TAU_MS) dt = LP_TAU_MS;
@@ -1178,6 +1706,11 @@ void loop() {
     lastActivityMs = now;
   }
 
+  if (motionOn()) {
+    runMotion(now, binChanged);
+    return;
+  }
+
   uint16_t duration = getDuration(curFrame);
   bool frameAdvance = (now - lastFrameTime >= duration);
   if (frameAdvance) {
@@ -1186,6 +1719,6 @@ void loop() {
   }
 
   if (frameAdvance || binChanged) {
-    drawFrameRotated(frameBuf, currentBin);
+    drawFrameRotated(frameBuf, currentBin, 0);
   }
 }

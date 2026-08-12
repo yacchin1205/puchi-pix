@@ -35,3 +35,27 @@ STM32_Programmer_CLI -c port=/dev/cu.usbserial-XXXXX br=115200 -ob displ
 ```
 
 `nBOOT_SEL : 0x0 (BOOT0 signal is defined by BOOT0 pin value (legacy mode))` means BOOT+RST will work.
+
+## ESP32 upload fails despite BOOT+RST
+
+On the ESP32 board, entering the bootloader with BOOT+RST sometimes doesn't take — the upload hangs at `Connecting...` for a while and then errors out with:
+
+```
+A fatal error occurred: Failed to connect to ESP32-C3: No serial data received.
+```
+
+BOOT (GPIO9) is a strapping pin sampled the moment reset is released, so what matters is the button order, not how long anything is held:
+
+1. Press and **hold** BOOT
+2. Press and release RST while still holding BOOT
+3. Wait a beat, **then** release BOOT — releasing it before (or together with) RST boots the app normally instead
+4. Give the USB port a second or two to re-enumerate, then start the upload
+
+If it still fails, power-cycle the board completely:
+
+1. Unplug USB
+2. Slide switch OFF, then back ON
+3. Plug USB back in
+4. BOOT+RST again (sequence above)
+
+The upload should connect after this.
