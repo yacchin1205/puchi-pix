@@ -9,20 +9,20 @@
 //   Upload  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF02
 //   Commit  (Write):       5550EEC9-B00F-4444-9876-AB12CD34EF03
 //   Status  (Read/Notify): 5550EEC9-B00F-4444-9876-AB12CD34EF04
-//   Motion  (Read/Write):  5550EEC9-B00F-4444-9876-AB12CD34EF05
 //   Proto   (Read):        5550EEC9-B00F-4444-9876-AB12CD34EF06
 //
 //   Upload: chunked writes appended in order to a 32 KB buffer.
 //   Commit: 0x01 = validate & swap, 0x02 = buffer reset, 0x03 = revert default.
 //   Status: 1 byte (0=idle, 1=receiving, 2=success, 3=error).
-//   Proto: 4 bytes [payloadVerMax, payloadVerMin, motionCfgLen, reserved].
-//     Read by the uploader on connect so a web/firmware protocol mismatch
-//     is reported explicitly instead of failing as a generic upload error
-//     (or, worse, a misparsed motion config).
-//   Motion: 16 bytes [enabled, mainStart lo/hi, loopStart lo/hi,
-//                     shakeStart lo/hi, outStart lo/hi, exitStart lo/hi,
-//                     speed, gap lo/hi, bg565 lo/hi].
-//     Splits the uploaded animation into up to six segments:
+//   Proto: 4 bytes [payloadVerMax, payloadVerMin, legacyMotionCfgLen,
+//     reserved]. Read by the uploader on connect so a web/firmware protocol
+//     mismatch is reported explicitly instead of failing as a generic
+//     upload error. legacyMotionCfgLen is 0: since v6 the motion config is
+//     embedded in the payload and the Motion characteristic is gone.
+//   Motion block (16 bytes, embedded in v6 payloads):
+//     [enabled, mainStart lo/hi, loopStart lo/hi, shakeStart lo/hi,
+//      outStart lo/hi, exitStart lo/hi, speed, gap lo/hi, bg565 lo/hi].
+//     Splits the animation into up to six segments:
 //       entry walk  [0, mainStart)         loops while walking in
 //       intro trans [mainStart, loopStart) plays once after arriving
 //       main loop   [loopStart, shakeStart | outStart | exitStart | N)
@@ -42,8 +42,8 @@
 //     `speed` source px/s, then the screen stays empty for `gap` ms after
 //     the exit before the next entry. bg565 fills everything outside the
 //     sprite (RGB565), matching the uploader's compositing background.
-//     Cleared by image commit / revert; the uploader re-sends it after each
-//     upload. Persisted to /motion.bin.
+//     Because the block lives inside the payload, image and presentation
+//     are committed, validated and persisted atomically (/img.bin only).
 //
 // Payload (sent via Upload, raw bytes appended in order):
 //   v1 (64x64 fixed):
@@ -85,6 +85,9 @@
 //     PackBits: control c < 128 = copy next c+1 bytes verbatim; c > 128 =
 //     repeat next byte (257 - c) times; c == 128 = no-op. 4bpp data is RLE'd
 //     on the packed bytes.
+//   v6: v5 with a 16-byte motion block between the header and the palette
+//     (palette starts at byte 24); see "Motion block" above. Validated as
+//     part of commit; v3-v5 payloads simply play as a plain loop.
 //   v5: v4 plus referenced-diff records (flags bit1). Instead of diffing
 //     against the previous frame, the rects patch a copy of an arbitrary
 //     EARLIER frame; an exact repeat is simply a referenced diff with zero
@@ -122,11 +125,21 @@
 #define BLE_UPLOAD_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef02"
 #define BLE_COMMIT_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef03"
 #define BLE_STATUS_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef04"
-#define BLE_MOTION_UUID       "5550eec9-b00f-4444-9876-ab12cd34ef05"
 #define BLE_PROTO_UUID        "5550eec9-b00f-4444-9876-ab12cd34ef06"
 
+// Accelerometer diagnostics: define to add a BLE characteristic (…ef07,
+// Read/Notify) streaming, every 200 ms, the window's max instantaneous
+// deviation and orientation drift per axis plus the motion phase — for
+// tuning HANDLE_DRIFT_THRESH / SHAKE_THRESH against measured noise. Off by
+// default; the uploader subscribes and logs automatically when the
+// characteristic exists.
+// #define PUCHI_DIAG_ACCEL 1
+#ifdef PUCHI_DIAG_ACCEL
+#define BLE_DIAG_UUID         "5550eec9-b00f-4444-9876-ab12cd34ef07"
+#endif
+
 static constexpr uint8_t PAYLOAD_VER_MIN = 1;
-static constexpr uint8_t PAYLOAD_VER_MAX = 5;
+static constexpr uint8_t PAYLOAD_VER_MAX = 6;
 
 static constexpr uint8_t MAX_UPLOADED_FRAMES = 16;
 
@@ -179,6 +192,12 @@ static constexpr uint8_t TFT_BL   = 8;
 static constexpr uint8_t I2C_SDA  = 20;
 static constexpr uint8_t I2C_SCL  = 21;
 static constexpr uint8_t KXTJ3_INT_PIN = 5;
+
+// Status LED D1: 3.3V -> 4.7k -> LED -> GPIO0, so LOW = lit. Blinks for a
+// second whenever (debounced) handling detection fires — the events that
+// keep the device awake and trigger walk-ins — so spurious accelerometer
+// activity is visible on a stationary device.
+static constexpr uint8_t STATUS_LED = 0;
 
 static constexpr int WIDTH  = 240;
 static constexpr int HEIGHT = 240;
@@ -387,13 +406,8 @@ static inline uint16_t uploadedFrameDuration(uint8_t idx) {
 // changes (frame indices are payload-specific).
 static MotionConfig motionCfg = { 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
 
-#define MOTION_PATH "/motion.bin"
-static constexpr size_t MOTION_CFG_LEN = 16;
-
-static volatile uint8_t motionCfgPending[MOTION_CFG_LEN];
-static volatile bool motionCfgWritten = false;
-static bool motionPersistPending = false;
-static bool motionClearPending = false;
+static constexpr uint32_t MOTION_BLOCK_OFF = 8;
+static constexpr uint32_t MOTION_BLOCK_LEN = 16;
 
 static inline bool motionOn() { return motionCfg.enabled && uploadedActive; }
 
@@ -921,6 +935,7 @@ static constexpr uint8_t MOUNT_NEUTRAL_BIN = 0;
 // hand tremor and linear-acceleration wobble that the old ~10 ms-equivalent
 // EMA passed straight through.
 static constexpr int32_t LP_TAU_MS = 200;
+static constexpr int32_t LP_SLOW_TAU_MS = 2000;  // handling-drift reference
 static constexpr int32_t MAG2_MIN = 24000000L;
 static constexpr uint8_t HYSTERESIS_SHIFT = 8;
 
@@ -944,8 +959,13 @@ static void displayOff() {
 }
 
 // ---- Timeouts ----
+// DIM/SLEEP drive the classic inactivity timer, used when no presentation
+// state machine is running (plain loop / built-in icon). With a motion
+// payload the phases are the authority instead: GAP dims immediately and
+// deep sleeps after GAP_SLEEP_MS (see the display-power block in loop()).
 static constexpr uint32_t DIM_TIMEOUT_MS   = 10000;
 static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
+static constexpr uint32_t GAP_SLEEP_MS     = 10000;
 
 // ---- State ----
 static uint16_t curFrame = 0;
@@ -954,7 +974,13 @@ static uint8_t currentBin = 0;
 static uint32_t lastFrameTime = 0;
 static uint16_t frameBuf[(uint32_t)MAX_IMG_SIZE * MAX_IMG_SIZE];
 static int16_t xRef = 0, yRef = 0, zRef = 0;
-static int32_t fxLp = 0, fyLp = 0;
+// Lowpass state is kept in <<8 fixed point: with the blend factor dt/tau
+// evaluated in integers, a plain-counts filter stalls once the remaining
+// difference falls below tau (2000 counts for the slow reference — found
+// the hard way). The fixed-point step shrinks that dead zone to tau/256.
+static int32_t fxLpFP = 0, fyLpFP = 0;
+static int32_t fxSlowFP = 0, fySlowFP = 0;
+static int32_t fxLp = 0, fyLp = 0;        // fxLpFP >> 8, for bin/magnitude use
 static uint32_t lastLpUpdateMs = 0;
 
 // Reset playback to frame 0 and compose it into frameBuf.
@@ -1043,14 +1069,27 @@ static void animAdvanceRange(uint16_t first, uint16_t last) {
 // Device-handling detection: raw accel deviating from the 200 ms lowpass by
 // more than ~0.04 g (600 counts at 16384/g) on either axis counts as
 // handling; it is considered ongoing for HANDLE_HOLD_MS after the last hit.
-static constexpr int32_t HANDLE_THRESH = 600;
+// Handling detection. Measured on this hardware, the instantaneous
+// |raw - lowpass| deviation of a resting device (windows peak ~700 counts)
+// overlaps a quietly held one (~800), so no instantaneous threshold can
+// separate them. Orientation drift can: the ~200 ms lowpass pulling away
+// from a ~2 s reference. A held device wanders by degrees over seconds
+// (1 deg of tilt ~= 286 counts at 1 g) while a resting one averages to
+// near zero on both timescales.
+static constexpr int32_t HANDLE_DRIFT_THRESH = 300;
+static constexpr uint8_t HANDLE_DEBOUNCE = 3;
 static constexpr uint32_t HANDLE_HOLD_MS = 2000;
+static uint8_t handleStreak = 0;
 static uint32_t lastHandledMs = 0;
+static uint32_t handleLedMs = 0;
 
-// Shake detection: a much larger deviation (~0.5 g) than plain handling.
-// Only shakes seen while the main loop is on screen arm the shake segment,
-// so a vigorous pickup doesn't fire it on entry.
+// Shake detection stays on the instantaneous deviation: measured windows
+// reach 10k-20k counts when shaken vs <700 at rest, a >10x margin. Only
+// shakes seen while the main loop is on screen arm the shake segment, so a
+// vigorous pickup doesn't fire it on entry.
 static constexpr int32_t SHAKE_THRESH = 8000;
+static constexpr uint8_t SHAKE_DEBOUNCE = 3;
+static uint8_t shakeStreak = 0;
 static bool shakePending = false;
 
 enum MotionPhase : uint8_t {
@@ -1060,6 +1099,7 @@ static MotionPhase motionPhase = PH_GAP;
 static int32_t motionPosMpx = 0;    // sprite offset, milli-source-px, + = right
 static uint32_t motionLastMs = 0;   // last position integration time
 static uint32_t gapReadyMs = 0;     // earliest allowed re-entry
+static uint32_t gapEnteredMs = 0;   // GAP entry time, drives GAP_SLEEP_MS
 static int16_t lastWalkShift = 0;
 
 static inline bool handledRecently(uint32_t now) {
@@ -1119,13 +1159,11 @@ static void parseMotionCfg(const uint8_t* p, MotionConfig& c) {
   c.bg         = (uint16_t)p[14] | ((uint16_t)p[15] << 8);
 }
 
-// Strict validation against the active image. Any inconsistency rejects the
-// whole config — nothing is silently collapsed or defaulted.
-static bool motionCfgValid(const MotionConfig& c) {
+// Strict validation against a payload with n frames. Any inconsistency
+// rejects the whole config — nothing is silently collapsed or defaulted.
+static bool motionCfgValid(const MotionConfig& c, uint16_t n) {
   if (c.speed == 0) return false;
   if (!c.enabled) return true;         // frame fields unused when disabled
-  if (!uploadedActive) return false;
-  const uint16_t n = uploadedFrameCount;
   if (c.mainStart >= n) return false;
   if (c.mainStart == 0 && c.loopStart != 0) return false;  // intro needs entry
   if (c.loopStart < c.mainStart || c.loopStart >= n) return false;
@@ -1138,70 +1176,16 @@ static bool motionCfgValid(const MotionConfig& c) {
   return true;
 }
 
-// Adopt a validated config and restart the presentation. Returns false (and
-// changes nothing) if the config no longer validates: the receive-time check
-// runs in the BLE task, and a commit may swap the image before loop() gets
-// here, so the precondition must be re-checked at adoption time.
-static bool applyMotionCfg(const uint8_t* p) {
-  MotionConfig c;
-  parseMotionCfg(p, c);
-  if (!motionCfgValid(c)) return false;
-  motionCfg = c;
-  applyActiveSource();
-
-  uint32_t now = millis();
-  fillScreen(motionCfg.bg);
-  lastFrameTime = now;
-  motionLastMs = now;
-  if (motionOn()) {
-    // Start hidden; seed the handling timer so the sprite walks in right
-    // away (config apply and deep-sleep wake both imply the user is there).
-    motionPhase = PH_GAP;
-    gapReadyMs = now;
-    lastHandledMs = now;
+// Adopt the presentation config carried by the active payload (v6); older
+// payloads and the built-in default play as a plain loop. The payload was
+// validated at commit/load time, motion block included.
+static void adoptPayloadMotion() {
+  if (uploadedActive && upVer >= 6) {
+    parseMotionCfg(&uploadBuf[MOTION_BLOCK_OFF], motionCfg);
   } else {
-    animReset();
-    drawFrameRotated(frameBuf, currentBin, 0);
+    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
   }
-  return true;
-}
-
-static bool persistMotionCfg() {
-  if (!LittleFS.begin(true)) return false;
-  File f = LittleFS.open(MOTION_PATH, "w");
-  if (!f) return false;
-  uint8_t b[MOTION_CFG_LEN] = {
-    motionCfg.enabled,
-    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
-    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
-    (uint8_t)motionCfg.shakeStart, (uint8_t)(motionCfg.shakeStart >> 8),
-    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
-    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
-    motionCfg.speed,
-    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
-    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
-  };
-  size_t n = f.write(b, MOTION_CFG_LEN);
-  f.close();
-  return n == MOTION_CFG_LEN;
-}
-
-static bool clearPersistedMotionCfg() {
-  if (!LittleFS.begin(true)) return false;
-  if (!LittleFS.exists(MOTION_PATH)) return true;
-  return LittleFS.remove(MOTION_PATH);
-}
-
-// Restore the persisted motion config (after the image itself was restored).
-static void loadMotionCfg() {
-  if (!uploadedActive) return;
-  if (!LittleFS.begin(true)) return;
-  File f = LittleFS.open(MOTION_PATH, "r");
-  if (!f) return;
-  uint8_t b[MOTION_CFG_LEN];
-  bool ok = (f.read(b, MOTION_CFG_LEN) == MOTION_CFG_LEN);
-  f.close();
-  if (!ok || !applyMotionCfg(b)) LittleFS.remove(MOTION_PATH);
+  applyActiveSource();
 }
 
 // Begin the walk-out. When the exit reuses frames that are not currently
@@ -1263,6 +1247,7 @@ static void runMotion(uint32_t now, bool binChanged) {
       } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
         motionPhase = PH_GAP;
         gapReadyMs = now + motionCfg.gapMs;
+        gapEnteredMs = now;
         fillScreen(motionCfg.bg);
         return;
       }
@@ -1358,24 +1343,15 @@ static uint8_t computeBin(int32_t fx, int32_t fy, uint8_t curBin) {
 
 static BLEServer* pServer = nullptr;
 static BLECharacteristic* pStatusChar = nullptr;
-static BLECharacteristic* pMotionChar = nullptr;
-
-// Reflect the currently applied config in the readable Motion characteristic.
-static void publishMotionCfg() {
-  if (!pMotionChar) return;
-  uint8_t b[MOTION_CFG_LEN] = {
-    motionCfg.enabled,
-    (uint8_t)motionCfg.mainStart, (uint8_t)(motionCfg.mainStart >> 8),
-    (uint8_t)motionCfg.loopStart, (uint8_t)(motionCfg.loopStart >> 8),
-    (uint8_t)motionCfg.shakeStart, (uint8_t)(motionCfg.shakeStart >> 8),
-    (uint8_t)motionCfg.outStart, (uint8_t)(motionCfg.outStart >> 8),
-    (uint8_t)motionCfg.exitStart, (uint8_t)(motionCfg.exitStart >> 8),
-    motionCfg.speed,
-    (uint8_t)motionCfg.gapMs, (uint8_t)(motionCfg.gapMs >> 8),
-    (uint8_t)motionCfg.bg, (uint8_t)(motionCfg.bg >> 8),
-  };
-  pMotionChar->setValue(b, MOTION_CFG_LEN);
-}
+#ifdef PUCHI_DIAG_ACCEL
+static BLECharacteristic* pDiagChar = nullptr;
+static int32_t diagMaxAdx = 0;
+static int32_t diagMaxAdy = 0;
+static int32_t diagMaxDdx = 0;
+static int32_t diagMaxDdy = 0;
+static bool diagDetected = false;
+static uint32_t diagNotifyMs = 0;
+#endif
 
 static void setStatus(uint8_t s) {
   uploadStatus = s;
@@ -1385,7 +1361,6 @@ static void setStatus(uint8_t s) {
     pStatusChar->notify();
   }
 }
-
 static bool validateUpload() {
   if (uploadPos < 4) return false;
   if (uploadBuf[0] != 'P' || uploadBuf[1] != 'P') return false;
@@ -1409,7 +1384,7 @@ static bool validateUpload() {
     if (bpp == 0) bpp = 4;
     if (bpp != 4 && bpp != 8) return false;
     palOff = 8;
-  } else if (ver >= 3 && ver <= 5) {  // diff chain (v4: +RLE, v5: +ref diff)
+  } else if (ver >= 3 && ver <= 6) {  // diff chain (v4 +RLE, v5 +ref, v6 +motion)
     if (uploadPos < 8) return false;
     n = (uint16_t)uploadBuf[3] | ((uint16_t)uploadBuf[4] << 8);
     if (n == 0) return false;
@@ -1417,7 +1392,13 @@ static bool validateUpload() {
     if (size != 64 && size != 120 && size != 128) return false;
     bpp = uploadBuf[6];
     if (bpp != 4 && bpp != 8) return false;
-    palOff = 8;
+    palOff = (ver >= 6) ? (MOTION_BLOCK_OFF + MOTION_BLOCK_LEN) : 8;
+    if (ver >= 6) {
+      if (uploadPos < palOff) return false;
+      MotionConfig mc;
+      parseMotionCfg(&uploadBuf[MOTION_BLOCK_OFF], mc);
+      if (!motionCfgValid(mc, n)) return false;
+    }
   } else {
     return false;
   }
@@ -1640,24 +1621,6 @@ class UploadCB : public BLECharacteristicCallbacks {
   }
 };
 
-class MotionCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override {
-    auto v = c->getValue();
-    if (v.length() != MOTION_CFG_LEN) {
-      setStatus(STATUS_ERROR);   // wrong-protocol write
-      return;
-    }
-    MotionConfig cfg;
-    parseMotionCfg((const uint8_t*)v.c_str(), cfg);
-    if (!motionCfgValid(cfg)) {
-      setStatus(STATUS_ERROR);   // reject the whole config at receive time
-      return;
-    }
-    memcpy((void*)motionCfgPending, v.c_str(), MOTION_CFG_LEN);
-    motionCfgWritten = true;     // adopted (display restart) in loop()
-  }
-};
-
 class CommitCB : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* c) override {
     auto v = c->getValue();
@@ -1720,16 +1683,17 @@ static void bleSetup() {
   uint8_t s0 = STATUS_IDLE;
   pStatusChar->setValue(&s0, 1);
 
-  pMotionChar = pService->createCharacteristic(
-    BLE_MOTION_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
-  pMotionChar->setCallbacks(new MotionCB());
-  publishMotionCfg();
-
   BLECharacteristic* pProto = pService->createCharacteristic(
     BLE_PROTO_UUID, BLECharacteristic::PROPERTY_READ);
-  uint8_t proto[4] = { PAYLOAD_VER_MAX, PAYLOAD_VER_MIN, MOTION_CFG_LEN, 0 };
+  uint8_t proto[4] = { PAYLOAD_VER_MAX, PAYLOAD_VER_MIN, 0, 0 };
   pProto->setValue(proto, 4);
+
+#ifdef PUCHI_DIAG_ACCEL
+  pDiagChar = pService->createCharacteristic(
+    BLE_DIAG_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pDiagChar->addDescriptor(new BLE2902());
+#endif
 
   pService->start();
 
@@ -1741,6 +1705,9 @@ static void bleSetup() {
 
 void setup() {
   gpio_hold_dis((gpio_num_t)TFT_RST);
+
+  pinMode(STATUS_LED, OUTPUT);
+  digitalWrite(STATUS_LED, HIGH);   // off until handling is detected
 
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
@@ -1779,6 +1746,10 @@ void setup() {
   currentBin = 0;
   fxLp = (int32_t)xRef * ACCEL_X_SIGN;
   fyLp = (int32_t)yRef * ACCEL_Y_SIGN;
+  fxLpFP = fxLp << 8;
+  fyLpFP = fyLp << 8;
+  fxSlowFP = fxLpFP;
+  fySlowFP = fyLpFP;
   lastFrameTime = millis();
   lastActivityMs = millis();
   lastLpUpdateMs = millis();
@@ -1787,62 +1758,91 @@ void setup() {
   // Surfaces filesystem / corruption errors via a colored splash.
   LoadResult lr = loadPersistedImage();
   showLoadError(lr);
-  loadMotionCfg();
+  adoptPayloadMotion();
 
   bleSetup();
 
-  if (!motionOn()) {
+  if (motionOn()) {
+    // Start hidden with the handling timer seeded, so the sprite walks in
+    // immediately after the wake-by-motion.
+    motionPhase = PH_GAP;
+    gapReadyMs = millis();
+    gapEnteredMs = millis();
+    lastHandledMs = millis();
+    motionLastMs = millis();
+  } else {
     animReset();
     drawFrameRotated(frameBuf, currentBin, 0);
   }
-  // else: applyMotionCfg() already primed PH_GAP with the handling timer
-  // seeded, so the sprite walks in immediately after the wake-by-motion.
 }
 
 void loop() {
   uint32_t now = millis();
+  digitalWrite(STATUS_LED, (now - handleLedMs < 1000) ? LOW : HIGH);
 
-  // Suppress sleep timer while a host is connected or a transfer is mid-flight.
-  if (bleConnected || uploadStatus == STATUS_RECEIVING) {
-    lastActivityMs = now;
+#ifdef PUCHI_DIAG_ACCEL
+  if (pDiagChar && now - diagNotifyMs >= 200) {
+    diagNotifyMs = now;
+    uint8_t d[10] = {
+      (uint8_t)diagMaxAdx, (uint8_t)(((uint32_t)diagMaxAdx >> 8) & 0xFF),
+      (uint8_t)diagMaxAdy, (uint8_t)(((uint32_t)diagMaxAdy >> 8) & 0xFF),
+      (uint8_t)diagMaxDdx, (uint8_t)(((uint32_t)diagMaxDdx >> 8) & 0xFF),
+      (uint8_t)diagMaxDdy, (uint8_t)(((uint32_t)diagMaxDdy >> 8) & 0xFF),
+      (uint8_t)motionPhase,
+      (uint8_t)(diagDetected ? 1 : 0),
+    };
+    pDiagChar->setValue(d, 10);
+    pDiagChar->notify();
+    diagMaxAdx = diagMaxAdy = diagMaxDdx = diagMaxDdy = 0;
+    diagDetected = false;
   }
-  uint32_t elapsed = now - lastActivityMs;
+#endif
 
-  if (elapsed >= SLEEP_TIMEOUT_MS) {
+  // Display power. With a motion payload the presentation state machine is
+  // the authority: active phases run at full brightness however long they
+  // take, and GAP (exit finished = absence confirmed) dims immediately and
+  // deep sleeps after GAP_SLEEP_MS. Without a state machine the classic
+  // inactivity timer decides. A connected host or an in-flight transfer
+  // suppresses sleep in both modes.
+  bool busy = bleConnected || uploadStatus == STATUS_RECEIVING;
+  if (busy) lastActivityMs = now;
+  bool dim;
+  bool sleepNow;
+  if (motionOn()) {
+    bool gap = (motionPhase == PH_GAP);
+    dim = gap;
+    sleepNow = gap && !busy && (now - gapEnteredMs >= GAP_SLEEP_MS);
+  } else {
+    uint32_t elapsed = now - lastActivityMs;
+    dim = (elapsed >= DIM_TIMEOUT_MS);
+    sleepNow = (elapsed >= SLEEP_TIMEOUT_MS);
+  }
+  if (sleepNow) {
     displayOff();
     clearLatchedInterrupt();
     esp_deep_sleep_start();
   }
-
-  analogWrite(TFT_BL, (elapsed >= DIM_TIMEOUT_MS) ? 40 : 255);
+  analogWrite(TFT_BL, dim ? 40 : 255);
 
   // Apply pending image source switch (commit or revert). The motion config
   // indexes frames of the previous payload, so it is cleared here; the
   // uploader re-sends it after a commit if the user wants motion.
   if (uploadCommittedFlag) {
     uploadCommittedFlag = false;
-    motionCfg = MotionConfig{ 0, 1, 0, 0, 0, 0, 60, 1000, 0x0000 };
-    motionCfgWritten = false;   // pending write targeted the previous payload
-    motionClearPending = true;
-    publishMotionCfg();
-    applyActiveSource();
+    adoptPayloadMotion();
     lastFrameTime = now;
-    fillScreen(0x0000);  // clear stale pixels outside the new output window
-    animReset();
-    drawFrameRotated(frameBuf, currentBin, 0);
-  }
-
-  // Apply a pending motion config write (deferred from the BLE callback so
-  // validation sees a settled image state, after any commit above).
-  if (motionCfgWritten) {
-    motionCfgWritten = false;
-    uint8_t b[MOTION_CFG_LEN];
-    memcpy(b, (const void*)motionCfgPending, MOTION_CFG_LEN);
-    if (applyMotionCfg(b)) {
-      publishMotionCfg();
-      motionPersistPending = true;
+    motionLastMs = now;
+    fillScreen(motionCfg.bg);  // clear stale pixels outside the new window
+    if (motionOn()) {
+      // Start hidden; seed the handling timer so the sprite walks in right
+      // away (a fresh commit implies the user is present).
+      motionPhase = PH_GAP;
+      gapReadyMs = now;
+      gapEnteredMs = now;
+      lastHandledMs = now;
     } else {
-      setStatus(STATUS_ERROR);
+      animReset();
+      drawFrameRotated(frameBuf, currentBin, 0);
     }
   }
 
@@ -1856,14 +1856,6 @@ void loop() {
     clearPersistRequested = false;
     if (!clearPersistedImage()) setStatus(STATUS_ERROR);
   }
-  if (motionPersistPending) {
-    motionPersistPending = false;
-    if (!persistMotionCfg()) setStatus(STATUS_ERROR);
-  }
-  if (motionClearPending) {
-    motionClearPending = false;
-    if (!clearPersistedMotionCfg()) setStatus(STATUS_ERROR);
-  }
 
   // Update lowpass on raw gravity vector. Blend factor is dt/tau so the
   // effective time constant stays ~LP_TAU_MS whether the loop is spinning
@@ -1872,24 +1864,55 @@ void loop() {
   if (readXYZRaw(rx, ry, rz)) {
     int32_t fx = (int32_t)rx * ACCEL_X_SIGN;
     int32_t fy = (int32_t)ry * ACCEL_Y_SIGN;
-    // Handling detection: raw deviating from the lowpass = the device is
-    // being moved by hand. Counts as activity (keeps the display awake).
-    int32_t adx = labs(fx - fxLp);
+    int32_t adx = labs(fx - fxLp);              // instantaneous dev (shake)
     int32_t ady = labs(fy - fyLp);
-    if (adx > HANDLE_THRESH || ady > HANDLE_THRESH) {
+    int32_t ddx = labs(fxLpFP - fxSlowFP) >> 8; // orientation drift (handling)
+    int32_t ddy = labs(fyLpFP - fySlowFP) >> 8;
+#ifdef PUCHI_DIAG_ACCEL
+    if (adx > diagMaxAdx) diagMaxAdx = adx;
+    if (ady > diagMaxAdy) diagMaxAdy = ady;
+    if (ddx > diagMaxDdx) diagMaxDdx = ddx;
+    if (ddy > diagMaxDdy) diagMaxDdy = ddy;
+#endif
+    // Handling: the fast lowpass drifting away from the slow reference.
+    // Counts as activity (keeps the display awake).
+    if (ddx > HANDLE_DRIFT_THRESH || ddy > HANDLE_DRIFT_THRESH) {
+      if (handleStreak < HANDLE_DEBOUNCE) handleStreak++;
+    } else {
+      handleStreak = 0;
+    }
+    if (handleStreak >= HANDLE_DEBOUNCE) {
       lastHandledMs = now;
       lastActivityMs = now;
+      handleLedMs = now;
+#ifdef PUCHI_DIAG_ACCEL
+      diagDetected = true;
+#endif
     }
-    if ((adx > SHAKE_THRESH || ady > SHAKE_THRESH) &&
-        motionOn() && motionPhase == PH_MAIN && hasShakeSeg()) {
-      shakePending = true;
+    // Shake: sustained instantaneous spikes far above the rest noise.
+    if (adx > SHAKE_THRESH || ady > SHAKE_THRESH) {
+      if (shakeStreak < SHAKE_DEBOUNCE) shakeStreak++;
+    } else {
+      shakeStreak = 0;
+    }
+    if (shakeStreak >= SHAKE_DEBOUNCE) {
+      lastHandledMs = now;                // shaking is handling, too
+      lastActivityMs = now;
+      if (motionOn() && motionPhase == PH_MAIN && hasShakeSeg()) {
+        shakePending = true;
+      }
     }
     int32_t dt = (int32_t)(now - lastLpUpdateMs);
     if (dt > 0) {
-      if (dt > LP_TAU_MS) dt = LP_TAU_MS;
       lastLpUpdateMs = now;
-      fxLp += (fx - fxLp) * dt / LP_TAU_MS;
-      fyLp += (fy - fyLp) * dt / LP_TAU_MS;
+      int32_t dtF = (dt > LP_TAU_MS) ? LP_TAU_MS : dt;
+      fxLpFP += (int32_t)(((int64_t)((fx << 8) - fxLpFP) * dtF) / LP_TAU_MS);
+      fyLpFP += (int32_t)(((int64_t)((fy << 8) - fyLpFP) * dtF) / LP_TAU_MS);
+      fxLp = fxLpFP >> 8;
+      fyLp = fyLpFP >> 8;
+      int32_t dtS = (dt > LP_SLOW_TAU_MS) ? LP_SLOW_TAU_MS : dt;
+      fxSlowFP += (int32_t)(((int64_t)(fxLpFP - fxSlowFP) * dtS) / LP_SLOW_TAU_MS);
+      fySlowFP += (int32_t)(((int64_t)(fyLpFP - fySlowFP) * dtS) / LP_SLOW_TAU_MS);
     }
   }
 

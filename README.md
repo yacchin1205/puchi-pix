@@ -51,11 +51,10 @@ BOOT (GPIO9) is a strapping pin sampled the moment reset is released, so what ma
 3. Wait a beat, **then** release BOOT — releasing it before (or together with) RST boots the app normally instead
 4. Give the USB port a second or two to re-enumerate, then start the upload
 
-If it still fails, power-cycle the board completely:
+If it still fails, power-cycle the board completely and enter the bootloader
+before plugging USB back in (on battery power) — this connects reliably:
 
 1. Unplug USB
 2. Slide switch OFF, then back ON
-3. Plug USB back in
-4. BOOT+RST again (sequence above)
-
-The upload should connect after this.
+3. BOOT+RST (sequence above)
+4. Plug USB back in, wait for the port to appear, then start the upload
