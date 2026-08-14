@@ -12,7 +12,8 @@
       padding: 0 1em;
       color: #222;
     }
-    h1 { font-size: 1.4em; }
+    h1 { font-size: 1.4em; margin-bottom: 0.2em; }
+    .intro-link { font-size: 0.9em; margin: 0 0 1em; }
     canvas {
       border: 1px solid #ccc;
       image-rendering: pixelated;
@@ -119,6 +120,7 @@
 </head>
 <body>
   <h1>puchi-pix BLE upload</h1>
+  <p class="intro-link"><a id="intro-link" href="INTRO-ja.html">Puchi-Pix(ぷちぴく)とは</a></p>
 
   <div class="row">
     <button id="connect">Connect</button>
@@ -288,6 +290,7 @@
           `this tool emits v${PAYLOAD_VERSION}. Update the firmware ` +
           '(or use a matching tool). Upload disabled.',
         savePreset: 'Save preset', loadPreset: 'Load preset',
+        introLink: 'About Puchi-Pix (Japanese)',
         logPresetSaved: n => `preset saved: ${n}`,
         logPresetFetch: u => `fetching preset: ${u}`,
         logPresetError: m => `preset error: ${m}`,
@@ -352,6 +355,7 @@
           `このツールは v${PAYLOAD_VERSION} です。` +
           'ファームウェアを更新してください。アップロードは無効です。',
         savePreset: '設定を保存', loadPreset: '設定を読み込み',
+        introLink: 'Puchi-Pix(ぷちぴく)とは',
         logPresetSaved: n => `プリセット保存: ${n}`,
         logPresetFetch: u => `プリセット取得中: ${u}`,
         logPresetError: m => `プリセットエラー: ${m}`,
@@ -396,6 +400,7 @@
     $('upload').textContent = T.upload;
     $('save').textContent = T.savePreset;
     $('load').textContent = T.loadPreset;
+    $('intro-link').textContent = T.introLink;
     $('revert').textContent = T.revert;
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
