@@ -6,6 +6,9 @@ on:
     paths:
       - 'tools/ble_upload/**'
       - 'manual/**'
+      - 'INTRO-ja.html'
+      - 'resources/puchi_pix_logo_256.png'
+      - 'resources/puchi-pix.png'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -34,6 +37,11 @@ jobs:
           mkdir _site_src
           cp -r tools/ble_upload/. _site_src/
           cp -r manual _site_src/manual
+          cp INTRO-ja.html _site_src/
+          mkdir _site_src/resources
+          cp resources/puchi_pix_logo_256.png _site_src/resources/
+          # web-sized overview is derived from the original at build time
+          convert resources/puchi-pix.png -resize 1000x1000 -quality 80 _site_src/resources/puchi-pix-overview.jpg
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site_src
