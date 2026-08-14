@@ -40,7 +40,9 @@
 //     main loop when there is no entry).
 //     When enabled, the sprite walks in from the right translating at
 //     `speed` source px/s, then the screen stays empty for `gap` ms after
-//     the exit before the next entry. bg565 fills everything outside the
+//     the exit before the next entry. speed = 0 -> no walk: the sprite
+//     appears and disappears in place (entry and a dedicated exit are
+//     rejected as inconsistent with no walk). bg565 fills everything outside the
 //     sprite (RGB565), matching the uploader's compositing background.
 //     Because the block lives inside the payload, image and presentation
 //     are committed, validated and persisted atomically (/img.bin only).
@@ -1162,8 +1164,10 @@ static void parseMotionCfg(const uint8_t* p, MotionConfig& c) {
 // Strict validation against a payload with n frames. Any inconsistency
 // rejects the whole config — nothing is silently collapsed or defaulted.
 static bool motionCfgValid(const MotionConfig& c, uint16_t n) {
-  if (c.speed == 0) return false;
-  if (!c.enabled) return true;         // frame fields unused when disabled
+  if (!c.enabled) return true;         // fields unused when disabled
+  // speed 0 = no walk (appear/disappear in place): walk segments would
+  // never play, so entry and a dedicated exit are rejected as inconsistent
+  if (c.speed == 0 && (c.mainStart != 0 || c.exitStart != 0)) return false;
   if (c.mainStart >= n) return false;
   if (c.mainStart == 0 && c.loopStart != 0) return false;  // intro needs entry
   if (c.loopStart < c.mainStart || c.loopStart >= n) return false;
@@ -1188,10 +1192,22 @@ static void adoptPayloadMotion() {
   applyActiveSource();
 }
 
+static void enterGap(uint32_t now) {
+  motionPhase = PH_GAP;
+  gapReadyMs = now + motionCfg.gapMs;
+  gapEnteredMs = now;
+  fillScreen(motionCfg.bg);
+}
+
 // Begin the walk-out. When the exit reuses frames that are not currently
 // playing, the chain is replayed to the segment start; without entry and
 // exit segments the main loop simply keeps playing while translating.
-static void startExit() {
+// speed 0 = no walk: the sprite disappears in place instead.
+static void startExit(uint32_t now) {
+  if (motionCfg.speed == 0) {
+    enterGap(now);
+    return;
+  }
   motionPhase = PH_EXIT;
   motionPosMpx = 0;
   if (motionCfg.exitStart || hasEntrySeg()) {
@@ -1210,9 +1226,15 @@ static void runMotion(uint32_t now, bool binChanged) {
   switch (motionPhase) {
     case PH_GAP:
       if (handledRecently(now) && (int32_t)(now - gapReadyMs) >= 0) {
-        motionPhase = PH_ENTER;
-        motionPosMpx = maxMpx;
-        animJumpTo(0);
+        if (motionCfg.speed == 0) {   // no walk: appear in place
+          motionPhase = PH_MAIN;
+          motionPosMpx = 0;
+          animJumpTo(loopFirstFrame());
+        } else {
+          motionPhase = PH_ENTER;
+          motionPosMpx = maxMpx;
+          animJumpTo(0);
+        }
         lastFrameTime = now;
         redraw = true;
       }
@@ -1245,10 +1267,7 @@ static void runMotion(uint32_t now, bool binChanged) {
         }
         redraw = true;
       } else if (motionPhase == PH_EXIT && motionPosMpx <= -maxMpx) {
-        motionPhase = PH_GAP;
-        gapReadyMs = now + motionCfg.gapMs;
-        gapEnteredMs = now;
-        fillScreen(motionCfg.bg);
+        enterGap(now);
         return;
       }
       break;
@@ -1281,7 +1300,7 @@ static void runMotion(uint32_t now, bool binChanged) {
             motionPhase = PH_TRANS_OUT;
             animAdvanceRange(motionCfg.outStart, outLastFrame());
           } else {
-            startExit();
+            startExit(now);
           }
         } else {
           animAdvanceRange(loopFirstFrame(), loopLastFrame());
@@ -1307,7 +1326,7 @@ static void runMotion(uint32_t now, bool binChanged) {
     case PH_TRANS_OUT:  // one-shot [outStart, exitStart | N)
       if (now - lastFrameTime >= getDuration(curFrame)) {
         lastFrameTime = now;
-        if (curFrame >= outLastFrame()) startExit();
+        if (curFrame >= outLastFrame()) startExit(now);
         else animAdvanceRange(motionCfg.outStart, outLastFrame());
         redraw = true;
       }
