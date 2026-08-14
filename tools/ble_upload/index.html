@@ -129,7 +129,7 @@
   </div>
 
   <div class="row">
-    <input type="file" id="file" accept="image/*">
+    <input type="file" id="file" accept="image/*,.json">
     <label><span id="bg-label">背景色</span> <input type="color" id="bg" value="#000000"></label>
     <select id="size">
       <option value="auto" selected>サイズ自動</option>
@@ -142,6 +142,9 @@
       <option value="256">256色 (8bit)</option>
     </select>
     <button id="upload" disabled>Upload</button>
+    <button id="save" disabled>設定を保存</button>
+    <button id="load">設定を読み込み</button>
+    <input type="file" id="preset-file" accept=".json,application/json" hidden>
   </div>
 
   <div class="panel">
@@ -172,7 +175,7 @@
   <div class="row">
     <label><input type="checkbox" id="m-loop" checked disabled> <span id="m-loop-label">単純ループ</span></label>
     <label id="m-speed-wrap" hidden><span id="m-speed-label">移動速度 (px/s)</span>
-      <input type="number" id="m-speed" min="1" max="255" value="60" style="width: 4.5em"></label>
+      <input type="number" id="m-speed" min="0" max="255" value="60" style="width: 4.5em"></label>
     <label id="m-gap-wrap" hidden><span id="m-gap-label">退場後の間 (ms)</span>
       <input type="number" id="m-gap" min="0" max="65535" value="1000" style="width: 5.5em"></label>
   </div>
@@ -268,7 +271,8 @@
         logRevertError: m => `revert error: ${m}`,
         revertConfirm: 'Revert the device image to the built-in default? The uploaded animation will be removed.',
         loopLabel: 'Simple loop',
-        mSpeedLabel: 'Walk speed (px/s)', mGapLabel: 'Gap after exit (ms)',
+        mSpeedLabel: 'Walk speed (px/s, 0 = stay in place)', mGapLabel: 'Gap after exit (ms)',
+        logNoWalk: 'no walk (speed 0): entry/exit segments removed',
         stripReset: 'Reset markers',
         stripResetConfirm: 'Reset the frame range and all segment markers to their initial state?',
         pvLabel: 'Preview', pvPlay: 'Play', pvStop: 'Stop',
@@ -283,6 +287,14 @@
           `Protocol mismatch: firmware supports payload v${dmin}-v${dmax}, ` +
           `this tool emits v${PAYLOAD_VERSION}. Update the firmware ` +
           '(or use a matching tool). Upload disabled.',
+        savePreset: 'Save preset', loadPreset: 'Load preset',
+        logPresetSaved: n => `preset saved: ${n}`,
+        logPresetFetch: u => `fetching preset: ${u}`,
+        logPresetError: m => `preset error: ${m}`,
+        logPresetApplied: n => `preset applied: ${n}`,
+        errPresetFormat: 'not a puchi-pix preset file',
+        errPresetVersion: v => `unsupported preset version ${v}`,
+        errPresetRange: n => `preset frame range does not fit this GIF (${n} frames)`,
       },
       ja: {
         connectBtn: '接続', disconnectBtn: '切断',
@@ -323,7 +335,8 @@
         logRevertError: m => `リバートエラー: ${m}`,
         revertConfirm: '本体の画像を内蔵デフォルトに戻します。アップロード済みのアニメーションは削除されます。よろしいですか?',
         loopLabel: '単純ループ',
-        mSpeedLabel: '移動速度 (px/s)', mGapLabel: '退場後の間 (ms)',
+        mSpeedLabel: '移動速度 (px/s, 0=移動なし)', mGapLabel: '退場後の間 (ms)',
+        logNoWalk: '移動なし(速度0): 入場/退場セグメントを外しました',
         stripReset: '初期状態に戻す',
         stripResetConfirm: 'フレーム範囲とセグメント設定をすべて初期状態に戻します。よろしいですか?',
         pvLabel: 'プレビュー', pvPlay: '再生', pvStop: '停止',
@@ -338,6 +351,14 @@
           `プロトコル不一致: ファーム側はペイロード v${dmin}〜v${dmax}、` +
           `このツールは v${PAYLOAD_VERSION} です。` +
           'ファームウェアを更新してください。アップロードは無効です。',
+        savePreset: '設定を保存', loadPreset: '設定を読み込み',
+        logPresetSaved: n => `プリセット保存: ${n}`,
+        logPresetFetch: u => `プリセット取得中: ${u}`,
+        logPresetError: m => `プリセットエラー: ${m}`,
+        logPresetApplied: n => `プリセット適用: ${n}`,
+        errPresetFormat: 'puchi-pixプリセット形式ではありません',
+        errPresetVersion: v => `未対応のプリセットバージョン ${v}`,
+        errPresetRange: n => `プリセットのフレーム範囲がGIF(全${n}フレーム)と一致しません`,
       },
     };
     const LANG = (navigator.language || '').toLowerCase().startsWith('ja') ? 'ja' : 'en';
@@ -373,6 +394,8 @@
     $('colors').options[0].textContent = T.colors16;
     $('colors').options[1].textContent = T.colors256;
     $('upload').textContent = T.upload;
+    $('save').textContent = T.savePreset;
+    $('load').textContent = T.loadPreset;
     $('revert').textContent = T.revert;
     $('range-label').textContent = T.rangeLabel;
     $('orig-label').textContent = T.origLabel;
@@ -839,6 +862,7 @@
       stripState.x = null;
       syncMarkerInputs();
       updateMotionVis();
+      applySpeedMode();   // re-drop the default entry when speed is 0
     };
 
     // ---- Timeline preview ----
@@ -928,6 +952,7 @@
       const s = stripState;
       const dt = Math.min(now - p.last, 100);
       p.last = now;
+      const noWalk = ($('m-speed').value | 0) === 0;
       const speed = Math.max($('m-speed').value | 0, 1);
       const gap = Math.max($('m-gap').value | 0, 0);
       const maxShift = (120 + pvSpriteSize() * 3 / 2) / 2 + 1;
@@ -944,9 +969,16 @@
         switch (p.phase) {
           case 'gap':
             if (now >= p.gapUntil) {
-              p.phase = 'enter';
-              p.pos = maxShift;
-              p.frame = seg.enter[0];
+              if (noWalk) {            // appear in place
+                p.phase = 'main';
+                p.pos = 0;
+                p.passes = 0;
+                p.frame = seg.loop[0];
+              } else {
+                p.phase = 'enter';
+                p.pos = maxShift;
+                p.frame = seg.enter[0];
+              }
               p.frameDue = now + pvDur(p.frame);
               p.shakeDone = false;
             }
@@ -1003,6 +1035,9 @@
                 } else if (seg.outro) {
                   p.phase = 'tout';
                   p.frame = seg.outro[0];
+                } else if (noWalk) {   // disappear in place
+                  p.phase = 'gap';
+                  p.gapUntil = now + gap;
                 } else {
                   p.phase = 'exit';
                   p.pos = 0;
@@ -1029,9 +1064,14 @@
           case 'tout':
             if (now >= p.frameDue) {
               if (p.frame >= seg.outro[1]) {
-                p.phase = 'exit';
-                p.pos = 0;
-                p.frame = seg.exit[0];
+                if (noWalk) {          // disappear in place
+                  p.phase = 'gap';
+                  p.gapUntil = now + gap;
+                } else {
+                  p.phase = 'exit';
+                  p.pos = 0;
+                  p.frame = seg.exit[0];
+                }
               } else {
                 p.frame++;
               }
@@ -1114,13 +1154,23 @@
     // ---- File pick / background change: (re)compose and build ----
     let lastFile = null;
 
+    // Returns whether the file itself parsed; a payload build failure (e.g.
+    // size over the device buffer) still counts as parsed so the timeline
+    // stays editable to fix it.
     const recompose = async (resetRange = false) => {
-      if (!lastFile) return;
+      if (!lastFile) return false;
       try {
         lastComposed = await fileToComposed(lastFile);
-        if (resetRange) resetFrameRange(lastComposed.composed.length);
-        buildStrip();     // thumbnails follow bg-color recomposition too
-        updateStrip();
+      } catch (err) {
+        log(T.logParseError(err.message));
+        payload = null;
+        return false;
+      }
+      if (resetRange) resetFrameRange(lastComposed.composed.length);
+      buildStrip();     // thumbnails follow bg-color recomposition too
+      updateStrip();
+      $('save').disabled = false;
+      try {
         payload = buildPayload(lastComposed);
         log(T.logBuilt(payload.length, payload[3] | (payload[4] << 8), payload[5], payload[6]));
         if (server && server.connected && compatible) $('upload').disabled = false;
@@ -1128,16 +1178,39 @@
         log(T.logParseError(err.message));
         payload = null;
       }
+      return true;
+    };
+
+    const loadPresetFile = async (file) => {
+      try {
+        await applyPreset(JSON.parse(await file.text()));
+      } catch (err) {
+        log(T.logPresetError(err.message));
+      }
     };
 
     $('file').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
+      if (/\.json$/i.test(file.name) || file.type === 'application/json') {
+        await loadPresetFile(file);
+        return;
+      }
       log(T.logLoading(file.name, file.size));
       lastFile = file;
       await recompose(true);
     });
-    $('bg').addEventListener('change', recompose);
+
+    $('load').addEventListener('click', () => $('preset-file').click());
+    $('preset-file').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      await loadPresetFile(file);
+      e.target.value = '';   // allow re-selecting the same file
+    });
+    // NOTE: not passing the handler directly — the event object would land
+    // in recompose's resetRange parameter and wipe the timeline markers.
+    $('bg').addEventListener('change', () => recompose(false));
 
     // ---- Size / color change: rebuild payload from the last loaded image ----
     const rebuild = () => {
@@ -1154,6 +1227,90 @@
     $('colors').addEventListener('change', rebuild);
     $('f-start').addEventListener('change', rebuild);
     $('f-end').addEventListener('change', rebuild);
+
+    // ---- Preset save / load ----
+    // A preset bundles the original GIF (base64) with every editor setting,
+    // so loading one restores the exact editing session. Intended for
+    // distributing image + motion combinations: host the JSON anywhere
+    // CORS-readable and open the uploader with ?preset=<url>.
+    const bytesToBase64 = (bytes) => {
+      let s = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(s);
+    };
+    const base64ToBytes = (b64) => {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    };
+
+    const exportPreset = async () => {
+      const s = stripState;
+      return {
+        format: 'puchi-pix-preset',
+        version: 1,
+        gif: {
+          name: lastFile.name,
+          data: bytesToBase64(new Uint8Array(await lastFile.arrayBuffer())),
+        },
+        settings: {
+          bg: $('bg').value,
+          size: $('size').value,
+          colors: $('colors').value,
+          simpleLoop: !motionEnabled(),
+          speed: $('m-speed').value | 0,
+          gap: $('m-gap').value | 0,
+          strip: { rs: s.rs, re: s.re, m: s.m, l: s.l, sh: s.sh, o: s.o, x: s.x },
+        },
+      };
+    };
+
+    $('save').addEventListener('click', async () => {
+      if (!lastFile) return;
+      const blob = new Blob([JSON.stringify(await exportPreset())],
+                            { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = lastFile.name.replace(/\.[^.]*$/, '') + '.puchi-pix.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      log(T.logPresetSaved(a.download));
+    });
+
+    const applyPreset = async (obj) => {
+      if (!obj || obj.format !== 'puchi-pix-preset' || !obj.gif || !obj.gif.data) {
+        throw new Error(T.errPresetFormat);
+      }
+      if (obj.version !== 1) throw new Error(T.errPresetVersion(obj.version));
+      const st = obj.settings || {};
+      if (st.bg) $('bg').value = st.bg;
+      if (st.size) $('size').value = st.size;
+      if (st.colors) $('colors').value = st.colors;
+      if (st.speed !== undefined) $('m-speed').value = st.speed;
+      if (st.gap !== undefined) $('m-gap').value = st.gap;
+      lastFile = new File([base64ToBytes(obj.gif.data)],
+                          obj.gif.name || 'preset.gif', { type: 'image/gif' });
+      log(T.logLoading(lastFile.name, lastFile.size));
+      if (!await recompose(true)) return;   // parse error already logged
+      const n = stripState.n;
+      if (!st.simpleLoop && n > 1 && st.strip) {
+        const p = st.strip;
+        if (!(p.rs >= 1 && p.rs <= p.re && p.re <= n)) throw new Error(T.errPresetRange(n));
+        $('m-loop').checked = false;
+        Object.assign(stripState, {
+          rs: p.rs, re: p.re, m: p.m, l: p.l,
+          sh: p.sh ?? null, o: p.o ?? null, x: p.x ?? null,
+        });
+        normalizeMarkers();   // value-driven clamp drops anything inconsistent
+        updateMotionVis();
+        rebuild();
+      }
+      applySpeedMode();       // enforce no-walk consistency for speed 0
+      log(T.logPresetApplied(lastFile.name));
+    };
 
     // ---- Upload ----
     $('upload').addEventListener('click', async () => {
@@ -1200,7 +1357,7 @@
       const shake = s.sh ? (s.sh - s.rs) : 0;
       const out = s.o ? (s.o - s.rs) : 0;
       const exit = s.x ? (s.x - s.rs) : 0;
-      const speed = Math.min(Math.max($('m-speed').value | 0, 1), 255);
+      const speed = Math.min(Math.max($('m-speed').value | 0, 0), 255);
       const gap = Math.min(Math.max($('m-gap').value | 0, 0), 65535);
       const bg = hexTo565($('bg').value);
       return Uint8Array.from([
@@ -1221,7 +1378,22 @@
     const updatePayloadMotion = () => {
       if (payload) payload.set(motionBlock(), 8);
     };
-    $('m-speed').addEventListener('change', updatePayloadMotion);
+    // speed 0 = no walk (appear/disappear in place). Entry/exit walk
+    // segments would never play, so they are dropped and locked while 0 —
+    // mirroring the firmware, which rejects the combination.
+    const applySpeedMode = () => {
+      const noWalk = ($('m-speed').value | 0) === 0;
+      $('e-on').disabled = noWalk;
+      $('x-on').disabled = noWalk;
+      if (noWalk && (stripState.m > stripState.rs || stripState.x)) {
+        stripState.m = stripState.rs;   // dropping the entry collapses the intro too
+        stripState.x = null;
+        log(T.logNoWalk);
+        normalizeMarkers();
+      }
+      updatePayloadMotion();
+    };
+    $('m-speed').addEventListener('change', applySpeedMode);
     $('m-gap').addEventListener('change', updatePayloadMotion);
 
     // ---- Disconnect ----
@@ -1762,8 +1934,27 @@
       ctx.drawImage(tmp, 0, 0, targetCanvas.width, targetCanvas.height);
     }
 
-    // Debug/test hook: expose the current payload bytes
+    // ---- Preset from URL (?preset=<url>) ----
+    // The preset host must allow CORS reads (same origin, GitHub raw/pages,
+    // gists etc. work). Failures are logged explicitly.
+    const presetUrl = new URLSearchParams(location.search).get('preset');
+    if (presetUrl) {
+      (async () => {
+        try {
+          log(T.logPresetFetch(presetUrl));
+          const res = await fetch(presetUrl);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          await applyPreset(await res.json());
+        } catch (err) {
+          log(T.logPresetError(err.message));
+        }
+      })();
+    }
+
+    // Debug/test hooks: current payload bytes, preset round-trip
     window._payload = () => payload;
+    window._exportPreset = exportPreset;
+    window._applyPreset = applyPreset;
   </script>
 </body>
 </html>
