@@ -30,6 +30,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # ImageMagick is not preinstalled on current runner images
+      - name: Install ImageMagick
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends imagemagick
       # Site root stays the uploader (existing URL unchanged); the manual
       # is published under /manual/.
       - name: Assemble site
