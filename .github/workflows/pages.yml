@@ -1,10 +1,11 @@
-name: Deploy BLE upload tool to GitHub Pages
+name: Deploy site (BLE upload tool + manual) to GitHub Pages
 
 on:
   push:
     branches: [main]
     paths:
       - 'tools/ble_upload/**'
+      - 'manual/**'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -26,8 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # Site root stays the uploader (existing URL unchanged); the manual
+      # is published under /manual/.
+      - name: Assemble site
+        run: |
+          mkdir _site_src
+          cp -r tools/ble_upload/. _site_src/
+          cp -r manual _site_src/manual
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: tools/ble_upload
+          path: _site_src
       - id: deployment
         uses: actions/deploy-pages@v4
