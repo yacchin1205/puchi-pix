@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>準備: バッテリーの接続 | Puchi-Pix</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      background: #f5f5f5;
+      color: #222;
+      line-height: 1.7;
+    }
+    header {
+      background: #222;
+      color: #fff;
+      padding: 0.8em 1em;
+    }
+    header .brand { font-size: 0.85em; opacity: 0.8; }
+    header h1 { font-size: 1.25em; margin: 0.1em 0 0; }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 1em 1em 3em;
+    }
+    .note p { margin: 0.3em 0; }
+    h2 {
+      margin: 2em 0 0.5em;
+      padding: 0.3em 0.6em;
+      background: #333;
+      color: #fff;
+      border-radius: 6px;
+      font-size: 1.1em;
+    }
+    .step, .note {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1em;
+      margin: 1em 0;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      column-gap: 1em;
+      align-items: start;
+      align-content: start;
+    }
+    .step h3, .step p, .note p { grid-column: 1; }
+    .step img, .note img { grid-column: 2; grid-row: 1 / span 4; }
+    @media (max-width: 560px) {
+      .step, .note { display: block; }
+    }
+    .step h3 {
+      margin: 0 0 0.5em;
+      font-size: 1em;
+    }
+    .step h3 .num {
+      display: inline-block;
+      background: #333;
+      color: #fff;
+      border-radius: 50%;
+      width: 1.6em;
+      height: 1.6em;
+      line-height: 1.6em;
+      text-align: center;
+      margin-right: 0.5em;
+      font-size: 0.95em;
+    }
+    .step img, .note img {
+      display: block;
+      max-width: 100%;
+      max-height: 200px;
+      border-radius: 6px;
+      margin: 0.5em 0 0;
+      cursor: zoom-in;
+    }
+    .step p { margin: 0.4em 0 0; }
+    .caution {
+      grid-column: 1;
+      background: #fff6e5;
+      border-left: 4px solid #e8a020;
+      border-radius: 4px;
+      padding: 0.4em 0.7em;
+      margin: 0.6em 0 0;
+      font-size: 0.95em;
+    }
+    #lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      cursor: zoom-out;
+      z-index: 10;
+    }
+    #lightbox.open { display: flex; }
+    #lightbox img {
+      max-width: 95vw;
+      max-height: 95vh;
+      border-radius: 6px;
+    }
+    .toc {
+      margin: 1em 0;
+      display: flex;
+      gap: 0.6em;
+    }
+    .toc a {
+      display: inline-block;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 0.4em 0.9em;
+      text-decoration: none;
+      color: #222;
+      font-weight: 600;
+    }
+    .toc a:hover { background: #eee; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">Puchi-Pix 取扱説明</div>
+    <h1>準備: バッテリーの接続</h1>
+  </header>
+  <main>
+    <p>Puchi-Pix は電池なしの状態でお渡ししています。はじめに、以下の手順でバッテリーを取り付けてください。</p>
+
+    <nav class="toc">
+      <a href="#round">丸型 (ESP32版)</a>
+      <a href="#square">角型 (STM32版)</a>
+    </nav>
+
+    <div class="note">
+      <p><strong>対応バッテリー: DTP502035</strong>(3.7V / 300mAh、コネクタ付きリチウムポリマー電池)</p>
+      <p>このバッテリーのみサポートしています。</p>
+      <img src="img/thumb/IMG_2886.jpg" data-full="img/IMG_2886.jpg" loading="lazy" alt="DTP502035 バッテリー">
+    </div>
+
+    <h2 id="round">丸型 (ESP32版)</h2>
+
+    <div class="step">
+      <h3><span class="num">1</span>裏蓋を外す</h3>
+      <p>裏蓋と表枠の継ぎ目に爪を引っ掛けて、徐々に開けて外します。</p>
+      <p class="caution">⚠️ 裏蓋を接続しているピンは弱いため、一気にこじ開けるとピンが折れることがあります。少しずつ開けてください。</p>
+      <img src="img/thumb/IMG_3778.jpg" data-full="img/IMG_3778.jpg" loading="lazy" alt="裏蓋を持ち上げて外す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">2</span>基板を取り出す</h3>
+      <p>基板の裏側にはバッテリーケースが取り付けられています。バッテリーを入れられるよう、基板ごとケースの表枠から取り外します。</p>
+      <img src="img/thumb/IMG_3787.jpg" data-full="img/IMG_3787.jpg" loading="lazy" alt="基板を表枠から取り外す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">3</span>バッテリーを接続する</h3>
+      <p>バッテリーのコネクタを、基板のコネクタに奥まで差し込みます。</p>
+      <img src="img/thumb/IMG_3790.jpg" data-full="img/IMG_3790.jpg" loading="lazy" alt="バッテリーのコネクタを基板に差し込む">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">4</span>バッテリーを収納する</h3>
+      <p>基板裏のバッテリーケースに、バッテリーを横からスライドさせて入れます。</p>
+      <img src="img/thumb/IMG_3796.jpg" data-full="img/IMG_3796.jpg" loading="lazy" alt="バッテリーをバッテリーケースにスライドして入れる">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">5</span>基板をケースに戻す</h3>
+      <p>ケースの表枠にあるピンに基板を合わせるようにして収めます。リード線を挟み込まないように注意してください。</p>
+      <img src="img/thumb/IMG_3804.jpg" data-full="img/IMG_3804.jpg" loading="lazy" alt="基板をケースに戻す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">6</span>裏蓋を閉じる</h3>
+      <p>裏蓋のピンを合わせて閉じます。</p>
+      <img src="img/thumb/IMG_3808.jpg" data-full="img/IMG_3808.jpg" loading="lazy" alt="裏蓋を閉じる">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">7</span>動作確認</h3>
+      <p>側面のスイッチをONにして、画面が表示されれば完了です。</p>
+      <img src="img/thumb/IMG_3812.jpg" data-full="img/IMG_3812.jpg" loading="lazy" alt="画面が表示された完成状態">
+    </div>
+
+    <h2 id="square">角型 (STM32版)</h2>
+
+    <div class="step">
+      <h3><span class="num">1</span>裏蓋を外す</h3>
+      <p>裏蓋の継ぎ目に爪をかけ、外します。</p>
+      <img src="img/thumb/IMG_3823.jpg" data-full="img/IMG_3823.jpg" loading="lazy" alt="裏蓋を持ち上げて外す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">2</span>基板を取り出す</h3>
+      <p>基板をケースから取り出します。</p>
+      <img src="img/thumb/IMG_3827.jpg" data-full="img/IMG_3827.jpg" loading="lazy" alt="基板をケースから取り出す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">3</span>表枠とディスプレイを外す</h3>
+      <p>表枠とディスプレイモジュールを分離します。</p>
+      <img src="img/thumb/IMG_3829.jpg" data-full="img/IMG_3829.jpg" loading="lazy" alt="表枠とディスプレイモジュールを分離する">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">4</span>バッテリーを接続する</h3>
+      <p>バッテリーのコネクタを、基板のコネクタに奥まで差し込みます。</p>
+      <img src="img/thumb/IMG_3836.jpg" data-full="img/IMG_3836.jpg" loading="lazy" alt="バッテリーのコネクタを基板に差し込む">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">5</span>バッテリーを電池ケージに収める</h3>
+      <p>裏蓋の電池ケージにバッテリーを納め、リード線は押さえピンに引っ掛けます。</p>
+      <img src="img/thumb/IMG_3846.jpg" data-full="img/IMG_3846.jpg" loading="lazy" alt="バッテリーを電池ケージに収める">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">6</span>基板をケースに戻す</h3>
+      <p>USB-C・スイッチが側面の窓に合う向きで収めます。</p>
+      <img src="img/thumb/IMG_3849.jpg" data-full="img/IMG_3849.jpg" loading="lazy" alt="基板をケースに戻す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">7</span>ディスプレイと表枠を戻す</h3>
+      <p>ディスプレイモジュールを表枠にはめ、ケースの前面に取り付けます。</p>
+      <img src="img/thumb/IMG_3851.jpg" data-full="img/IMG_3851.jpg" loading="lazy" alt="ディスプレイと表枠を戻す">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">8</span>裏蓋を閉じる</h3>
+      <p>裏蓋を閉じます。裏蓋は、写真のようにボールチェーン穴がない側面を先にはめてから、押し込むとやりやすいです。</p>
+      <img src="img/thumb/IMG_3854.jpg" data-full="img/IMG_3854.jpg" loading="lazy" alt="裏蓋を閉じる">
+    </div>
+
+    <div class="step">
+      <h3><span class="num">9</span>動作確認</h3>
+      <p>側面のスイッチをONにして、画面が表示されれば完了です。</p>
+      <img src="img/thumb/IMG_3862.jpg" data-full="img/IMG_3862.jpg" loading="lazy" alt="画面が表示された完成状態">
+    </div>
+  </main>
+
+  <div id="lightbox"><img alt=""></div>
+  <script>
+    const lb = document.getElementById('lightbox');
+    const lbImg = lb.querySelector('img');
+    for (const img of document.querySelectorAll('img[data-full]')) {
+      img.addEventListener('click', () => {
+        lbImg.src = img.dataset.full;
+        lbImg.alt = img.alt;
+        lb.classList.add('open');
+      });
+    }
+    const close = () => {
+      lb.classList.remove('open');
+      lbImg.src = '';
+    };
+    lb.addEventListener('click', close);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') close();
+    });
+  </script>
+</body>
+</html>
