@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Puchi-Pix(ぷちぴく)とは | Puchi-Pix</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      background: #f5f5f5;
+      color: #222;
+      line-height: 1.8;
+    }
+    header {
+      background: #222;
+      color: #fff;
+      padding: 0.8em 1em;
+      display: flex;
+      align-items: center;
+      gap: 0.7em;
+    }
+    header img {
+      width: 44px;
+      height: 44px;
+      image-rendering: pixelated;
+    }
+    header .brand { font-size: 0.85em; opacity: 0.8; }
+    header h1 { font-size: 1.25em; margin: 0.1em 0 0; }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 1em 1em 3em;
+    }
+    h2 {
+      margin: 2em 0 0.5em;
+      padding: 0.3em 0.6em;
+      background: #333;
+      color: #fff;
+      border-radius: 6px;
+      font-size: 1.1em;
+    }
+    .card {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 1em;
+      margin: 1em 0;
+    }
+    .card p { margin: 0.6em 0; }
+    .overview {
+      display: block;
+      max-width: 100%;
+      border-radius: 8px;
+      margin: 1em 0;
+    }
+    table {
+      border-collapse: collapse;
+      margin: 0.5em 0;
+      width: 100%;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 0.35em 0.7em;
+      text-align: left;
+      background: #fff;
+      font-size: 0.95em;
+    }
+    th { background: #eee; }
+    code {
+      background: #eee;
+      border-radius: 4px;
+      padding: 0.1em 0.4em;
+      font-size: 0.9em;
+    }
+    ul { padding-left: 1.4em; }
+    li { margin: 0.3em 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="resources/puchi_pix_logo_256.png" alt="Puchi-Pix ロゴ">
+    <div>
+      <div class="brand">Puchi-Pix</div>
+      <h1>Puchi-Pix(ぷちぴく)とは</h1>
+    </div>
+  </header>
+  <main>
+    <img class="overview" src="resources/puchi-pix-overview.jpg" alt="Puchi-Pix の概要イラスト">
+
+    <div class="card">
+      <p>Puchi-Pix は、「ドット絵アニメをポケットに入れて持ち歩きたい」という素朴な欲望から生まれたプロジェクトです。</p>
+      <p>STM32G030F6P と小型ディスプレイを組み合わせた、キーホルダーサイズの自作マイコンボード。コイン電池の面倒な交換ではなく、この小ささでは珍しい LiPo 充電回路をオンボードで搭載しました — ポケットの中で暮らすデバイスには、それが必須だからです。GPIO と加速度センサも引き出してあり、小さな開発ボードとしても使えます。現在は、丸型液晶+ESP32-C3 を使った Bluetooth 対応版(中サイズ)もあります。</p>
+      <p>STM32G030F6P のフラッシュはわずか 32KB。ここにアニメーションを収めるには、フレーム間の差分圧縮、4bit パレット、1バイト単位の切り詰めが必要になります。かつて、この種の制約は「週末の工作」には高すぎる壁でした。</p>
+      <p>いまはコーディングエージェントの時代です。圧縮方式の試行錯誤も、フレームデータの生成も、ハードウェアの限界へ挑む作業も、「会話」として進められるようになりました。制約が消えるわけではありません。けれど、それは壁ではなく、工芸になります。</p>
+      <p>Puchi-Pix は、この時代のためのプロジェクトです — 制約だらけのハードウェアと、作りたい気持ちと、その間に橋を架ける AI コーディングエージェント。</p>
+    </div>
+
+    <h2>リポジトリの歩き方</h2>
+
+    <div class="card">
+      <p>基板・ファームウェア・ケース・ツールはすべて GitHub で公開しています:
+        <a href="https://github.com/yacchin1205/puchi-pix">github.com/yacchin1205/puchi-pix</a></p>
+      <table>
+        <tr><th>場所</th><th>内容</th></tr>
+        <tr><td><code>puchi_pix/</code></td><td>小サイズ(STM32版)基板の CAD データ (KiCad)</td></tr>
+        <tr><td><code>puchi_pix_esp32/</code></td><td>中サイズ(ESP32版)基板の CAD データ (KiCad)</td></tr>
+        <tr><td><code>firmware/puchi_pix/</code></td><td>小サイズのファームウェア (Arduino)</td></tr>
+        <tr><td><code>firmware/puchi_pix_esp32/</code></td><td>中サイズのファームウェア (Arduino)</td></tr>
+        <tr><td><code>tools/ble_upload/</code></td><td>画像アップローダ (Web アプリ)</td></tr>
+        <tr><td><code>resources/</code></td><td>GIF → 画像データ変換ツールなど</td></tr>
+        <tr><td><code>box/</code></td><td>ケースの 3D プリントデータ (STL / Blender)</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <p><strong>ケース STL の対応表</strong></p>
+      <table>
+        <tr><th>ファイル</th><th>パーツ</th></tr>
+        <tr><td><code>box-u.stl</code></td><td>角型(小サイズ) 表ケース</td></tr>
+        <tr><td><code>box-l.stl</code></td><td>角型(小サイズ) 裏蓋</td></tr>
+        <tr><td><code>box-esp32-a.stl</code></td><td>丸型(中サイズ) 表ケース</td></tr>
+        <tr><td><code>box-esp32-b.stl</code></td><td>丸型(中サイズ) バッテリーケース</td></tr>
+        <tr><td><code>box-esp32-c.stl</code></td><td>丸型(中サイズ) 裏蓋</td></tr>
+      </table>
+    </div>
+
+    <h2>リンク</h2>
+    <ul>
+      <li><a href="https://github.com/yacchin1205/puchi-pix">GitHub リポジトリ</a></li>
+      <li><a href="https://yacchin1205.github.io/puchi-pix/">画像アップローダ(中サイズ用)</a></li>
+      <li><a href="https://yacchin1205.github.io/puchi-pix/manual/battery/">準備: バッテリーの接続</a></li>
+      <li><a href="https://puchi-pix-c108.yazawa-d7a.workers.dev/customize/">カスタマイズ: データ・プログラムの転送</a></li>
+    </ul>
+  </main>
+</body>
+</html>
