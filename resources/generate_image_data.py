@@ -566,7 +566,7 @@ def main():
         if crop is not None:
             role_args += f' --crop {crop[0]}:{crop[1]}'
         if walk_seq is not None:
-            role_args = f' --walk-seq {",".join(map(str, walk_seq))} --main-start {main_start}'
+            role_args += f' --walk-seq {",".join(map(str, walk_seq))} --main-start {main_start}'
             if intro_start is not None:
                 role_args += f' --intro-start {intro_start}'
             if outro_start is not None:
