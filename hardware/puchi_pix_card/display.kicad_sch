@@ -1,0 +1,12 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "22f35b9f-eacd-41aa-9000-edac99fe3391")
+	(paper "A3")
+	(title_block
+		(title "puchi_pix_card - 16x16 RGB matrix / drivers / scan")
+		(company "puchi_pix_card")
+	)
+	(lib_symbols)
+)

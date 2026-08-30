@@ -1,0 +1,103 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "68e11f83-6621-4a95-99d2-cf3319172deb")
+	(paper "A4")
+	(title_block
+		(title "puchi_pix_card")
+		(comment 1 "16x16 RGB pixel art display / STM32G0B1 + MBI5153x3 + FM-B2020RGBA")
+		(comment 2 "Power: AAAx3 -> TPS61023 boost 5V(VLED), XC6206 3.3V x2 (SYS always-on / PERIPH gated)")
+	)
+	(lib_symbols)
+	(sheet
+		(at 127 50.8)
+		(size 50.8 25.4)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0.0000)
+		)
+		(uuid "39b95bc8-43d3-4bee-847f-f27193d97409")
+		(property "Sheetname" "display"
+			(at 127 50.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "display.kicad_sch"
+			(at 127 76.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "puchi_pix_card"
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 50.8 50.8)
+		(size 50.8 25.4)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0.0000)
+		)
+		(uuid "fe5fa423-265d-4590-b32d-2202514db510")
+		(property "Sheetname" "mcu"
+			(at 50.8 50.1 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "mcu.kicad_sch"
+			(at 50.8 76.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "puchi_pix_card"
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/"
+			(page "1")
+		)
+	)
+	(embedded_fonts no)
+)
