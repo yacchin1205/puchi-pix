@@ -35,6 +35,11 @@ static const uint8_t REG_WUTH_L     = 0x6B;
 
 static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
 static constexpr uint32_t FRAME_MS = 33;
+
+// USB 検出: VBUS 3.0V (ピン 1.5V) 以上で「あり」。D1 の逆リークでノードが
+// 浮く誤検出対策として閾値を高めに置く (レビュー S6。分圧は 10k/10k)
+static constexpr uint16_t VBUS_PRESENT_ADC = (uint16_t)(1.5f / 3.3f * 4095);
+static bool vbusPresent = false;
 static volatile uint32_t lastActivityMs = 0;
 static uint32_t lastFrameMs = 0;
 static uint16_t animTick = 0;
@@ -59,11 +64,6 @@ static void clearLatchedInterrupt() {
   Wire.endTransmission(false);
   Wire.requestFrom(KXTJ3_ADDR, (uint8_t)1);
   (void)Wire.read();
-}
-
-static void setAccelHighRes(bool highRes) {
-  write8(REG_CTRL1, 0x00); delay(10);
-  write8(REG_CTRL1, highRes ? 0xC2 : 0x82); delay(50);
 }
 
 static void enableWakeupInterrupt() {
@@ -111,8 +111,8 @@ static void flashPinsBegin() {
 // 出力を残すと保護ダイオード経由で未給電の NOR に逆給電する
 static void flashPinsEnd() {
   SPI.end();
-  pinMode(PIN_FLASH_CS, INPUT);
-  pinMode(PA5, INPUT); pinMode(PA6, INPUT); pinMode(PA7, INPUT);
+  pinMode(PIN_FLASH_CS, INPUT_ANALOG);
+  pinMode(PA5, INPUT_ANALOG); pinMode(PA6, INPUT_ANALOG); pinMode(PA7, INPUT_ANALOG);
 }
 
 static uint32_t flashReadJedecId() {
@@ -192,15 +192,26 @@ static void enterSleep() {
   flashPinsEnd();
   powerRailsOff();
   digitalWrite(PIN_STATUS_LED, LOW);
-  setAccelHighRes(false);
+  // 8bit モード + ODR 0.781Hz へ (50Hz のままだと ~10µA、0.781Hz で ~1.5µA。
+  // Wake-Up 機能は OWUF (CTRL2) 独立なので検出への影響なし。レビュー S8)
+  write8(REG_CTRL1, 0x00); delay(10);
+  write8(REG_DATA_CTRL, 0x08);
+  write8(REG_CTRL1, 0x82); delay(50);
   clearLatchedInterrupt();
+
+  // USB 挿入でも起きられるようにする (レビュー M5)。PA1 は普段 ADC 入力
+  pinMode(PIN_VBUS_SENSE, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_VBUS_SENSE), wakeupCallback, RISING);
 
   HAL_SuspendTick();
   HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
   SystemClock_Config();
   HAL_ResumeTick();
 
-  setAccelHighRes(true);
+  detachInterrupt(digitalPinToInterrupt(PIN_VBUS_SENSE));
+  write8(REG_CTRL1, 0x00); delay(10);
+  write8(REG_DATA_CTRL, 0x02);              // ODR 50Hz へ復帰
+  write8(REG_CTRL1, 0xC2); delay(50);
   powerRailsOn();
   flashPinsBegin();
   mbiBegin();
@@ -244,7 +255,20 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  if (now - lastActivityMs >= SLEEP_TIMEOUT_MS) {
+  // USB 給電中は昇圧を止めて VBUS 側から給電する (レビュー S3: 昇圧 5.0V >
+  // VBUS-VF のため、昇圧を動かしたままだと USB 接続中も電池が減る)
+  static uint32_t lastVbusCheckMs = 0;
+  if (now - lastVbusCheckMs >= 100) {
+    lastVbusCheckMs = now;
+    bool present = analogRead(PIN_VBUS_SENSE) > VBUS_PRESENT_ADC;
+    if (present != vbusPresent) {
+      vbusPresent = present;
+      digitalWrite(PIN_BOOST_EN, vbusPresent ? LOW : HIGH);
+    }
+  }
+
+  // USB 接続中はスリープしない (レビュー M5: ホストから見て応答不能になる)
+  if (!vbusPresent && now - lastActivityMs >= SLEEP_TIMEOUT_MS) {
     enterSleep();
     return;
   }
