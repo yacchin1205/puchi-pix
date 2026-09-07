@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "puchi_pix_card")(type "KiCad")(uri "${KIPRJMOD}/puchi_pix_card.pretty")(options "")(descr "puchi_pix_card project footprints"))
+)
