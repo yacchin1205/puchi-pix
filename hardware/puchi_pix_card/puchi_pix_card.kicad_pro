@@ -488,8 +488,8 @@
         "priority": 2147483647,
         "schematic_color": "rgba(0, 0, 0, 0.000)",
         "track_width": 0.2,
-        "via_diameter": 0.6,
-        "via_drill": 0.3,
+        "via_diameter": 0.45,
+        "via_drill": 0.2,
         "wire_width": 6
       },
       {
@@ -612,7 +612,7 @@
       "include_excluded_from_bom": true,
       "name": "Default Editing",
       "sort_asc": true,
-      "sort_field": "リファレンス"
+      "sort_field": "\u30ea\u30d5\u30a1\u30ec\u30f3\u30b9"
     },
     "connection_grid_size": 50.0,
     "drawing": {
