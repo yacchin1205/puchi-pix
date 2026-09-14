@@ -13725,7 +13725,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "SWD (JST SH 4P)"
+		(property "Value" "SWD XDWF-0910-04P (JST SH compatible)"
 			(at 270.51 62.2299 0)
 			(effects
 				(font

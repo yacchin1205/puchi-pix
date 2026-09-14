@@ -1694,7 +1694,7 @@
 		)
 		(uuid "83503bfb-a365-4d27-9674-e055c4ce0fc9")
 	)
-	(text "Columns: COL_R/G/B c = cathode buses (COL0 left) -> MBI5153 OUT c. Chain MCU SDI -> U101(R) -> U102(G) -> U103(B) -> MCU SDO."
+	(text "Columns: COL_R/G/B c = cathode buses (COL0 left) -> MBI5124 OUT c. Chain MCU SDI -> U101(R) -> U102(G) -> U103(B) -> MCU SDO. Grayscale is made by the MCU (BCM via /OE on pin 21)."
 		(exclude_from_sim no)
 		(at 299.72 303.53 0)
 		(effects
@@ -1705,7 +1705,7 @@
 		)
 		(uuid "880140fe-1e89-4691-8ee4-31dac56680bb")
 	)
-	(text "Rext: IOUT=(0.61V/Rext)x24 (MBI5153 p21) -> R 1.8k=8.1mA (+180R series drop, MBI DS p24), G 2.4k=6.1mA, B 4.7k=3.1mA max; config gain 12.5-200%."
+	(text "Rext: IOUT=(1.23V/Rext)x15 (MBI5124 p14) -> R 1.8k=10.3mA (+180R series drop), G 2.4k=7.7mA, B 4.7k=3.9mA. Limit at VDD=3.3V is 10mA (p8); no current gain register."
 		(exclude_from_sim no)
 		(at 299.72 306.07 0)
 		(effects

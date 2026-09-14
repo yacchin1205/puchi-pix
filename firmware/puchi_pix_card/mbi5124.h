@@ -20,7 +20,10 @@
 //   - データラッチは LE 単独パルス (CLK なし, p12 "Latch data")。設定レジスタは
 //     LE=High の間に CLK 4 発 (p12)。色ごとの推奨値 (p12) を電源投入時に書く。
 //   - シフト順: 先に送ったビットが最遠端 (U103=B) の OUT15 に届く (p5 D15→OUT15)。
-//   - タイミング: T0=3µs (SPI 16MHz の 48bit=3µs と同じ) → 1行 ≈ 0.8ms、16行 ≈ 12.7ms (≈79Hz)
+//   - タイミング: T0=3µs → 1行 ≈ 0.8ms、16行 ≈ 12.7ms (≈79Hz)。SPI2 は 8MHz (48bit=6µs)。
+//     3.3V 時の CLK→SDO 伝搬遅延 max 50ns (p10) に対し 16MHz ではチェーン段間の余裕が
+//     10ns しかないため 8MHz にしている。短いプレーン (3µs, 6µs) では転送が点灯時間を
+//     超えるが、次の割込が待たされて消灯区間が延びるだけで、点灯幅はハードが決める。
 #pragma once
 #include <Arduino.h>
 #include <HardwareTimer.h>
@@ -42,7 +45,7 @@ static constexpr uint8_t MATRIX_H = 16;
 
 static constexpr uint8_t  MBI_PLANES   = 8;
 static constexpr uint32_t MBI_T0_TICKS = 3 * 64;      // TIM1 64MHz: LSB プレーン 3µs
-static constexpr uint32_t MBI_SPI_HZ   = 16000000;    // MBI5124 CLK 上限 25MHz (p1)
+static constexpr uint32_t MBI_SPI_HZ   = 8000000;     // 上限 25MHz (p1) だが 3.3V のチェーン遅延を優先
 static constexpr uint8_t  MBI_STREAM_BYTES = 6;       // 3チップ × 16bit
 
 // 設定レジスタ (p12): LED の色ごとのプリチャージ/ゴースト除去設定
@@ -104,7 +107,7 @@ static inline void mbiLatch() {
   mbiPin(GPIOB, MBI_LE_BIT, false);
 }
 
-// 48bit を SPI2 で送る (ISR 内から呼ぶ)。転送完了まで戻らない (16MHz で 3µs)。
+// 48bit を SPI2 で送る (ISR 内から呼ぶ)。転送完了まで戻らない (8MHz で 6µs)。
 // 受信側 (MBI_SDO) は使わないので FIFO を捨て、OVR を消す。
 static void mbiShift48(const uint8_t* stream) {
   for (uint8_t i = 0; i < MBI_STREAM_BYTES; i++) {
@@ -196,6 +199,7 @@ static void mbiUploadFrame() {
       }
     }
   }
+  __DMB();               // プレーン書込を確定させてから ISR に切替を見せる
   mbiSwapPending = true;
 }
 
@@ -239,15 +243,20 @@ static void mbiBegin() {
   mbiOeTimer.setInterruptPriority(0, 0);        // プレーン周期のジッタ防止
   mbiOeTimer.attachInterrupt(mbiPlaneEnd);
   srRowsEnable(true);
-  mbiPlaneEnd();                                // 行0 プレーン0 から開始
+  // 行0 プレーン0 から開始。プレーン0 の 3µs は mbiShift48 より短く、割込禁止なしでは
+  // ISR が本関数のシフト中に再入して 595 に '0' が 2 個入る (行の二重点灯)
+  __disable_irq();
+  mbiPlaneEnd();
+  __enable_irq();                               // 保留中のオーバーフロー割込がここで走る
 }
 
 // スリープ前: 行を全OFFにしてから止める。+3V3P/+5V 断の前に呼ぶ。
 // USB 給電中はレールが残るため、「消灯した状態」を明示的に作る (S4)。
 static void mbiEnd() {
-  mbiOeTimer.pause();                           // 以後 ISR は来ない
+  mbiOeTimer.pause();                           // 以後 ISR は来ない (CEN=0 で即停止)
   mbiOeTimer.detachInterrupt();
-  while (TIM1->CR1 & TIM_CR1_CEN) {}            // 進行中の /OE パルスは終わらせる
+  TIM1->CCR1 = 0;                               // パルス途中で止まっていても /OE=High に戻す
+  TIM1->EGR  = TIM_EGR_UG;
   mbiSwapPending = false;
   srAllOff();                                   // 全行OFFをラッチしてから
   srRowsEnable(false);                          //   /OE リリース (C2: PD1 はドレイン開放)

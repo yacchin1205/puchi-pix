@@ -6,7 +6,7 @@
 	(paper "A4")
 	(title_block
 		(title "puchi_pix_card")
-		(comment 1 "16x16 RGB pixel art display / STM32G0B1 + MBI5153x3 + FM-B2020RGBA")
+		(comment 1 "16x16 RGB pixel art display / STM32G0B1 + MBI5124x3 + FM-B2020RGBA")
 		(comment 2 "Power: AAAx3 -> TPS61023 boost 5V(VLED), XC6206 3.3V x2 (SYS always-on / PERIPH gated)")
 	)
 	(lib_symbols)

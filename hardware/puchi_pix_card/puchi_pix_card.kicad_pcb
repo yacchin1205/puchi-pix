@@ -58196,7 +58196,7 @@
 			)
 		)
 	)
-	(footprint "JST_SH_SM04B-SRSS-TB_1x04-1MP_P1.00mm_Horizontal"
+	(footprint "Connector_JST:JST_SH_SM04B-SRSS-TB_1x04-1MP_P1.00mm_Horizontal"
 		(layer "B.Cu")
 		(uuid "06c35922-202c-48bd-9e43-c9fafac54db8")
 		(at 103.75 106.61 90)
@@ -58214,7 +58214,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Value" "SWD (JST SH 4P)"
+		(property "Value" "SWD XDWF-0910-04P (JST SH compatible)"
 			(at 0 -3.98 270)
 			(layer "B.Fab")
 			(uuid "0c4f8c0a-3ca8-4d11-bbec-98d8ea13a430")

@@ -12,8 +12,8 @@
 // ピン (hardware/puchi_pix_card/mcu.kicad_sch)
 // =====================
 static constexpr uint32_t PIN_ACC_INT    = PA0;   // KXTJ3 INT (SYS_WKUP1)
-static constexpr uint32_t PIN_VBUS_SENSE = PA1;   // VBUS 100k/100k
-static constexpr uint32_t PIN_VBAT_ADC   = PB1;   // 電池 4.7M/4.7M
+static constexpr uint32_t PIN_VBUS_SENSE = PA1;   // VBUS 10k/10k (R6/R7)
+static constexpr uint32_t PIN_VBAT_ADC   = PB1;   // 電池 1M/1M (R10/R11) + 100nF
 static constexpr uint32_t PIN_BOOST_EN   = PD2;   // TPS61023 EN (1M プルダウン)
 static constexpr uint32_t PIN_STATUS_LED = PD3;   // 1k → LED → GND
 static constexpr uint32_t PIN_FLASH_CS   = PA4;   // W25Q64 (SPI1: PA5/PA6/PA7)
@@ -254,6 +254,12 @@ void setup() {
 
 void loop() {
   uint32_t now = millis();
+
+  // KXTJ3 の INT はラッチ (INT_CTRL1 IEL=0)。解放しないと Low のまま次の FALLING が
+  // 来ず、動かしていても lastActivityMs が更新されない。wakeupCallback は FALLING で更新済み
+  if (digitalRead(PIN_ACC_INT) == LOW) {
+    clearLatchedInterrupt();
+  }
 
   // USB 給電中は昇圧を止めて VBUS 側から給電する (レビュー S3: 昇圧 5.0V >
   // VBUS-VF のため、昇圧を動かしたままだと USB 接続中も電池が減る)
