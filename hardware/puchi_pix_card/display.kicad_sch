@@ -33972,6 +33972,36 @@
 	)
 	(wire
 		(pts
+			(xy 474.98 109.22) (xy 474.98 106.68)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a7b2dcbe-47c6-4cbd-a35b-041e0cee9de6")
+	)
+	(global_label "+5V"
+		(shape input)
+		(at 474.98 106.68 90)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "5289b440-4b17-4a64-a0ff-2be2a4498386")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 535.94 157.48 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+	)
+	(wire
+		(pts
 			(xy 269.24 95.25) (xy 269.24 97.79)
 		)
 		(stroke
@@ -56856,6 +56886,148 @@
 			(project "puchi_pix_card"
 				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/39b95bc8-43d3-4bee-847f-f27193d97409"
 					(reference "C105")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 474.98 113.03 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "b1174474-2ab7-4b82-992d-ccfb063d92d2")
+		(property "Reference" "C106"
+			(at 477.52 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "10uF"
+			(at 477.52 114.3 0)
+			(effects
+				(font
+					(size 1.016 1.016)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0603_1608Metric"
+			(at 474.98 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 474.98 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 474.98 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "LCSC" "C96446"
+			(at 474.98 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "089052a3-eb96-4a0a-9e99-e0781bb80342")
+		)
+		(pin "2"
+			(uuid "3049a5f8-0a46-48d7-8a93-4db7c202a99e")
+		)
+		(instances
+			(project "puchi_pix_card"
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/39b95bc8-43d3-4bee-847f-f27193d97409"
+					(reference "C106")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 474.98 116.84 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "371cabb3-3d09-4792-94f0-fd7fd01fb190")
+		(property "Reference" "#PWR114"
+			(at 474.98 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "GND"
+			(at 474.98 120.65 0)
+			(effects
+				(font
+					(size 1.016 1.016)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 474.98 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 474.98 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 474.98 116.84 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "f8fd46fe-95eb-4255-8b9b-d99aaf934868")
+		)
+		(instances
+			(project "puchi_pix_card"
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/39b95bc8-43d3-4bee-847f-f27193d97409"
+					(reference "#PWR114")
 					(unit 1)
 				)
 			)
