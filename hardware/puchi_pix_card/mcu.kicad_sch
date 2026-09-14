@@ -8534,7 +8534,7 @@
 			)
 		)
 	)
-	(global_label "GCLK"
+	(global_label "MBI_OE"
 		(shape input)
 		(at 356.87 87.63 0)
 		(fields_autoplaced yes)
@@ -8777,6 +8777,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25879"
+			(at 214.63 119.38 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 214.63 119.38 0)
 			(effects
@@ -8839,6 +8848,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 328.93 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 328.93 46.99 0)
 			(effects
 				(font
@@ -8983,6 +9001,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C52923"
+			(at 173.99 196.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 173.99 196.85 0)
 			(effects
@@ -9043,6 +9070,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 71.12 152.4 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C8598"
 			(at 71.12 152.4 0)
 			(effects
 				(font
@@ -9178,6 +9214,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 255.27 203.2 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C25744"
 			(at 255.27 203.2 0)
 			(effects
 				(font
@@ -9387,6 +9432,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C380332"
+			(at 82.55 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 82.55 104.14 0)
 			(effects
@@ -9521,6 +9575,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C22629"
+			(at 92.71 29.21 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Schottky diode"
 			(at 92.71 29.21 0)
 			(effects
@@ -9582,6 +9645,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 104.14 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C26083"
 			(at 104.14 111.76 0)
 			(effects
 				(font
@@ -9660,6 +9732,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C52923"
+			(at 214.63 196.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 214.63 196.85 0)
 			(effects
@@ -9702,7 +9783,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "135k"
+		(property "Value" "133k"
 			(at 130.81 110.4901 0)
 			(effects
 				(font
@@ -9721,6 +9802,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 133.35 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C25753"
 			(at 133.35 111.76 0)
 			(effects
 				(font
@@ -9931,6 +10021,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C45783"
+			(at 163.83 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 163.83 111.76 0)
 			(effects
@@ -9993,6 +10092,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 198.12 113.03 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 198.12 113.03 0)
 			(effects
 				(font
@@ -10136,6 +10244,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C442603"
+			(at 167.64 148.59 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "±2g / 4g / 8g / 16g Tri-Axis Digital Accelerometer, I2C, 1.71-3.6V, LGA-12"
 			(at 193.04 135.89 0)
 			(effects
@@ -10228,6 +10345,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 276.86 198.12 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 276.86 198.12 0)
 			(effects
 				(font
@@ -10362,6 +10488,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 92.71 41.91 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C22629"
 			(at 92.71 41.91 0)
 			(effects
 				(font
@@ -10571,6 +10706,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C11702"
+			(at 257.81 114.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 257.81 114.3 0)
 			(effects
@@ -10701,6 +10845,16 @@
 			)
 		)
 		(property "Datasheet" "https://www.st.com/resource/en/datasheet/usblc6-2.pdf"
+			(at 69.85 215.265 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C7519"
 			(at 69.85 215.265 0)
 			(effects
 				(font
@@ -11121,6 +11275,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C52923"
+			(at 135.89 48.26 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 135.89 48.26 0)
 			(effects
@@ -11191,6 +11354,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C139797"
+			(at 232.41 86.36 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Push button switch, generic, two pins"
 			(at 237.49 86.36 0)
 			(effects
@@ -11250,6 +11422,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 142.24 125.73 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C1555"
 			(at 142.24 125.73 0)
 			(effects
 				(font
@@ -11328,6 +11509,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C139797"
+			(at 201.93 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Push button switch, generic, two pins"
 			(at 207.01 49.53 0)
 			(effects
@@ -11388,6 +11578,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 246.38 114.3 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C12624"
 			(at 246.38 114.3 0)
 			(effects
 				(font
@@ -11475,6 +11674,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C23733"
+			(at 356.87 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 356.87 46.99 0)
 			(effects
@@ -11536,6 +11744,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 87.63 138.43 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C309458"
 			(at 87.63 138.43 0)
 			(effects
 				(font
@@ -11782,7 +11999,7 @@
 				)
 			)
 		)
-		(property "Value" "XC6206PxxxMR"
+		(property "Value" "XC6206P332MR"
 			(at 119.38 33.02 0)
 			(effects
 				(font
@@ -11801,6 +12018,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.torexsemi.com/file/xc6206/XC6206.pdf"
+			(at 119.38 36.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5446"
 			(at 119.38 36.83 0)
 			(effects
 				(font
@@ -11882,6 +12108,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C309458"
+			(at 342.9 46.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 342.9 46.99 0)
 			(effects
@@ -11942,6 +12177,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/tps61023.pdf"
+			(at 119.38 101.6 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C919459"
 			(at 119.38 101.6 0)
 			(effects
 				(font
@@ -12024,6 +12268,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.winbond.com/resource-files/w25q128jv_dtr%20revc%2003272018%20plus.pdf"
+			(at 270.51 196.85 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C179171"
 			(at 270.51 196.85 0)
 			(effects
 				(font
@@ -12179,6 +12432,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32g0b1cb.pdf"
+			(at 317.5 107.95 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C2847904"
 			(at 317.5 107.95 0)
 			(effects
 				(font
@@ -12593,6 +12855,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C52923"
+			(at 105.41 48.26 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 105.41 48.26 0)
 			(effects
@@ -12851,6 +13122,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 69.85 173.99 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C25905"
 			(at 69.85 173.99 0)
 			(effects
 				(font
@@ -13126,6 +13406,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25905"
+			(at 77.47 185.42 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 77.47 185.42 0)
 			(effects
@@ -13188,6 +13477,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 57.15 158.75 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C52923"
 			(at 57.15 158.75 0)
 			(effects
 				(font
@@ -13304,7 +13602,7 @@
 				)
 			)
 		)
-		(property "Value" "USB_C_Receptacle_USB2.0_16P"
+		(property "Value" "TYPE-C 16P QTWT"
 			(at 31.75 172.72 0)
 			(effects
 				(font
@@ -13322,6 +13620,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.usb.org/sites/default/files/documents/usb_type-c.zip"
+			(at 35.56 193.04 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5187472"
 			(at 35.56 193.04 0)
 			(effects
 				(font
@@ -13529,6 +13836,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25879"
+			(at 223.52 119.38 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 223.52 119.38 0)
 			(effects
@@ -13598,6 +13914,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25744"
+			(at 24.13 264.16 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 24.13 264.16 0)
 			(effects
@@ -13640,7 +13965,7 @@
 				)
 			)
 		)
-		(property "Value" "XC6206PxxxMR"
+		(property "Value" "XC6206P332MR"
 			(at 196.85 189.23 0)
 			(effects
 				(font
@@ -13659,6 +13984,15 @@
 			)
 		)
 		(property "Datasheet" "https://www.torexsemi.com/file/xc6206/XC6206.pdf"
+			(at 196.85 193.04 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5446"
 			(at 196.85 193.04 0)
 			(effects
 				(font
@@ -13882,6 +14216,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C309458"
+			(at 251.46 85.09 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 251.46 85.09 0)
 			(effects
@@ -14083,6 +14426,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25879"
+			(at 218.44 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 218.44 57.15 0)
 			(effects
@@ -14209,6 +14561,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 68.58 106.68 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C49023767"
 			(at 68.58 106.68 0)
 			(effects
 				(font
@@ -14421,6 +14782,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C25744"
+			(at 24.13 250.19 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 24.13 250.19 0)
 			(effects
@@ -14482,6 +14852,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 93.98 120.65 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C26083"
 			(at 93.98 120.65 0)
 			(effects
 				(font
@@ -14626,6 +15005,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C45783"
+			(at 152.4 111.76 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Unpolarized capacitor"
 			(at 152.4 111.76 0)
 			(effects
@@ -14761,6 +15149,15 @@
 				(hide yes)
 			)
 		)
+		(property "LCSC" "C26083"
+			(at 93.98 134.62 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
 		(property "Description" "Resistor"
 			(at 93.98 134.62 0)
 			(effects
@@ -14822,6 +15219,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 142.24 106.68 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C26083"
 			(at 142.24 106.68 0)
 			(effects
 				(font
