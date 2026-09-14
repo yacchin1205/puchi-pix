@@ -59352,7 +59352,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "~"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -59365,7 +59365,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -59378,7 +59378,24 @@
 				(justify mirror)
 			)
 		)
+		(property "LCSC" "C5221292"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "B.Fab")
+			(hide yes)
+			(uuid "dd61c93a-46a2-498a-ae67-017f85e8e8be")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+				(justify mirror)
+			)
+		)
+		(property ki_fp_filters "Connector*:*_1x??_*")
 		(path "/fe5fa423-265d-4590-b32d-2202514db510/5a6ec0c7-ef7b-4613-9be4-bc9f698bea05")
+		(sheetname "/mcu/")
+		(sheetfile "mcu.kicad_sch")
 		(attr smd)
 		(fp_circle
 			(center 0 0)
@@ -59418,6 +59435,8 @@
 			(size 2.5 2.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(net 1 "Net-(BT1-Pin_1)")
+			(pinfunction "Pin_1")
+			(pintype "passive")
 			(uuid "b5ddd057-844d-43ea-bbd7-0ed517d49ba3")
 		)
 		(embedded_fonts no)
@@ -60487,7 +60506,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "~"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -60500,7 +60519,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -60513,6 +60532,24 @@
 				(justify mirror)
 			)
 		)
+		(property "LCSC" "C5221292"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "B.Fab")
+			(hide yes)
+			(uuid "98c02725-93d2-4fea-bd6d-39143b3a3ea6")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+				(justify mirror)
+			)
+		)
+		(property ki_fp_filters "Connector*:*_1x??_*")
+		(path "/fe5fa423-265d-4590-b32d-2202514db510/d9c24931-35b7-4208-a214-a85d2eb94155")
+		(sheetname "/mcu/")
+		(sheetfile "mcu.kicad_sch")
 		(attr smd)
 		(fp_circle
 			(center 0 0)
@@ -60552,6 +60589,8 @@
 			(size 2.5 2.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(net 2 "GND")
+			(pinfunction "Pin_1")
+			(pintype "passive")
 			(uuid "ce84a26a-b45e-4dd6-9d2c-5e2cc146c7ff")
 		)
 		(embedded_fonts no)
@@ -61011,7 +61050,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "~"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -61024,7 +61063,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -61037,7 +61076,24 @@
 				(justify mirror)
 			)
 		)
+		(property "LCSC" "C5221292"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "B.Fab")
+			(hide yes)
+			(uuid "ddb7bd36-3280-4cba-8aa1-8863d5e4e193")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+				(justify mirror)
+			)
+		)
+		(property ki_fp_filters "Connector*:*_1x??_*")
 		(path "/fe5fa423-265d-4590-b32d-2202514db510/c8aa91a8-4d2d-4299-9c8a-2fa28e162e41")
+		(sheetname "/mcu/")
+		(sheetfile "mcu.kicad_sch")
 		(attr smd)
 		(fp_circle
 			(center 0 0)
@@ -61077,6 +61133,8 @@
 			(size 2.5 2.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(net 1 "Net-(BT1-Pin_1)")
+			(pinfunction "Pin_1")
+			(pintype "passive")
 			(uuid "28f3ec61-3a5e-4f79-8fc2-670e51d3b811")
 		)
 		(embedded_fonts no)
@@ -74001,7 +74059,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "~"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -74014,7 +74072,7 @@
 				(justify mirror)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
 			(at 0 0 0)
 			(layer "B.Fab")
 			(hide yes)
@@ -74027,6 +74085,24 @@
 				(justify mirror)
 			)
 		)
+		(property "LCSC" "C5221292"
+			(at 0 0 180)
+			(unlocked yes)
+			(layer "B.Fab")
+			(hide yes)
+			(uuid "3c9bbd35-42ad-476c-b516-41a4a47cfaab")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+				(justify mirror)
+			)
+		)
+		(property ki_fp_filters "Connector*:*_1x??_*")
+		(path "/fe5fa423-265d-4590-b32d-2202514db510/344f1860-a5f2-408f-a77e-339efb5e1895")
+		(sheetname "/mcu/")
+		(sheetfile "mcu.kicad_sch")
 		(attr smd)
 		(fp_circle
 			(center 0 0)
@@ -74066,6 +74142,8 @@
 			(size 2.5 2.5)
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(net 2 "GND")
+			(pinfunction "Pin_1")
+			(pintype "passive")
 			(uuid "78bbc423-5539-4e38-a2fe-58dad1b86eff")
 		)
 		(embedded_fonts no)
@@ -76861,7 +76939,24 @@
 				(justify mirror)
 			)
 		)
+		(property "LCSC" "C96446"
+			(at 0 0 0)
+			(unlocked yes)
+			(layer "B.Fab")
+			(hide yes)
+			(uuid "726b70bf-a126-46f6-887a-75b68cd54aac")
+			(effects
+				(font
+					(size 1 1)
+					(thickness 0.15)
+				)
+				(justify mirror)
+			)
+		)
+		(property ki_fp_filters "C_*")
 		(path "/39b95bc8-43d3-4bee-847f-f27193d97409/b1174474-2ab7-4b82-992d-ccfb063d92d2")
+		(sheetname "/display/")
+		(sheetfile "display.kicad_sch")
 		(attr smd)
 		(fp_line
 			(start -0.14058 -0.51)
@@ -76923,6 +77018,7 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(net 3 "+5V")
+			(pintype "passive")
 			(uuid "c81efdae-9664-4f74-a8c2-499fdf67b64f")
 		)
 		(pad "2" smd roundrect
@@ -76931,6 +77027,7 @@
 			(layers "B.Cu" "B.Mask" "B.Paste")
 			(roundrect_rratio 0.25)
 			(net 2 "GND")
+			(pintype "passive")
 			(uuid "93128961-0aa5-4b0d-9f30-553285a69606")
 		)
 		(embedded_fonts no)
