@@ -706,6 +706,119 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Connector_Generic:Conn_01x01"
+			(pin_names
+				(offset 1.016)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J"
+				(at 0 2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "Conn_01x01"
+				(at 0 -2.54 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "~"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" "Generic connector, single row, 01x01, script generated (kicad-library-utils/schlib/autogen/connector/)"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_keywords" "connector"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_fp_filters" "Connector*:*_1x??_*"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "Conn_01x01_1_1"
+				(rectangle
+					(start -1.27 1.27)
+					(end 1.27 -1.27)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(rectangle
+					(start -1.27 0.127)
+					(end 0 -0.127)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(pin passive line
+					(at -5.08 0 0)
+					(length 3.81)
+					(name "Pin_1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Connector_Generic:Conn_01x04"
 			(pin_names
 				(offset 1.016)
@@ -5781,16 +5894,6 @@
 	)
 	(wire
 		(pts
-			(xy 262.89 62.23) (xy 250.19 62.23)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0fa4992b-9dfb-4597-a12f-d88a24972059")
-	)
-	(wire
-		(pts
 			(xy 345.44 69.85) (xy 350.52 69.85)
 		)
 		(stroke
@@ -6161,16 +6264,6 @@
 	)
 	(wire
 		(pts
-			(xy 262.89 57.15) (xy 255.27 57.15)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "32f08526-6427-489a-a023-0212e4c22c60")
-	)
-	(wire
-		(pts
 			(xy 135.89 54.61) (xy 135.89 52.07)
 		)
 		(stroke
@@ -6371,7 +6464,7 @@
 	)
 	(wire
 		(pts
-			(xy 255.27 57.15) (xy 255.27 36.83)
+			(xy 255.27 59.69) (xy 255.27 36.83)
 		)
 		(stroke
 			(width 0)
@@ -7041,16 +7134,6 @@
 	)
 	(wire
 		(pts
-			(xy 262.89 64.77) (xy 257.81 64.77)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "90fbba3f-b727-4a07-8205-298295451cc4")
-	)
-	(wire
-		(pts
 			(xy 30.48 99.06) (xy 30.48 102.87)
 		)
 		(stroke
@@ -7338,16 +7421,6 @@
 			(type default)
 		)
 		(uuid "b40fd959-f83f-4a57-8634-c99f4f66c580")
-	)
-	(wire
-		(pts
-			(xy 257.81 64.77) (xy 257.81 68.58)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b444d1dc-ac21-4e25-bf53-797f7492ce20")
 	)
 	(wire
 		(pts
@@ -7971,16 +8044,6 @@
 	)
 	(wire
 		(pts
-			(xy 250.19 59.69) (xy 262.89 59.69)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "f7a20ca6-7815-49ed-a3f4-a1d5b8f8962f")
-	)
-	(wire
-		(pts
 			(xy 285.75 96.52) (xy 281.94 96.52)
 		)
 		(stroke
@@ -8420,7 +8483,7 @@
 		(uuid "ea8914ab-c3cd-4492-8a8b-102a12305e71")
 	)
 	(label "BOOT{slash}SWCLK"
-		(at 250.19 62.23 0)
+		(at 250.19 64.77 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -8440,7 +8503,7 @@
 		(uuid "f519da94-1b6a-4f12-8045-e4af5e191fc1")
 	)
 	(label "SWDIO"
-		(at 250.19 59.69 0)
+		(at 250.19 62.23 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -10192,101 +10255,6 @@
 			(project "puchi_pix_card"
 				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
 					(reference "C15")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:Battery")
-		(at 44.45 99.06 270)
-		(unit 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "445ffad8-e238-443b-b3d0-8de47402b06a")
-		(property "Reference" "BT1"
-			(at 45.0215 91.44 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "3xAAA"
-			(at 45.0215 93.98 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 45.974 99.06 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Datasheet" "~"
-			(at 45.974 99.06 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Description" "Multiple-cell battery"
-			(at 44.45 99.06 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Sim.Device" "V"
-			(at 44.45 99.06 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Sim.Type" "DC"
-			(at 44.45 99.06 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(property "Sim.Pins" "1=+ 2=-"
-			(at 44.45 99.06 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(hide yes)
-			)
-		)
-		(pin "2"
-			(uuid "ada380ae-9360-42c2-adac-cbf40165a3fd")
-		)
-		(pin "1"
-			(uuid "bbd3363d-fb4f-4ac1-b750-7dc2ba0cbe03")
-		)
-		(instances
-			(project ""
-				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
-					(reference "BT1")
 					(unit 1)
 				)
 			)
@@ -12983,7 +12951,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 257.81 68.58 0)
+		(at 259.08 57.15 180)
 		(unit 1)
 		(exclude_from_sim no)
 		(in_bom yes)
@@ -12992,7 +12960,7 @@
 		(fields_autoplaced yes)
 		(uuid "af50ab84-e398-4472-b7f5-224c26f7d91d")
 		(property "Reference" "#PWR028"
-			(at 257.81 74.93 0)
+			(at 259.08 50.8 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13001,7 +12969,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 257.81 73.66 0)
+			(at 259.08 53.34 0)
 			(effects
 				(font
 					(size 1.27 1.27)
@@ -13450,7 +13418,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "Conn_01x04"
+		(property "Value" "SWD (JST SH 4P)"
 			(at 270.51 62.2299 0)
 			(effects
 				(font
@@ -13459,7 +13427,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical_SMD_Pin1Left"
+		(property "Footprint" "Connector_JST:JST_SH_SM04B-SRSS-TB_1x04-1MP_P1.00mm_Horizontal"
 			(at 267.97 59.69 0)
 			(effects
 				(font
@@ -13469,6 +13437,15 @@
 			)
 		)
 		(property "Datasheet" "~"
+			(at 267.97 59.69 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C7527619"
 			(at 267.97 59.69 0)
 			(effects
 				(font
@@ -14874,6 +14851,440 @@
 					(reference "R1")
 					(unit 1)
 				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 262.89 57.15) (xy 259.08 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "0d48912d-93c9-4360-8190-13543fc19262")
+	)
+	(wire
+		(pts
+			(xy 262.89 59.69) (xy 255.27 59.69)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a238fd9f-720d-4d8c-a111-0df86511f18d")
+	)
+	(wire
+		(pts
+			(xy 250.19 62.23) (xy 262.89 62.23)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "75da00b2-2f9a-4965-9df0-0fbf9a01947e")
+	)
+	(wire
+		(pts
+			(xy 250.19 64.77) (xy 262.89 64.77)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "982c4f9d-3c18-4407-9e6c-500a317aec6f")
+	)
+	(global_label "+3V3S"
+		(shape input)
+		(at 255.27 59.69 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "972ebe02-f98c-4d8c-aab1-de46e169b847")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_01x01")
+		(at 54.61 93.98 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "c8aa91a8-4d2d-4299-9c8a-2fa28e162e41")
+		(property "Reference" "BT1"
+			(at 57.15 92.71000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "POGO BT+"
+			(at 57.15 95.25000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "puchi_pix_card:Pogo_YTC1P_D2.0"
+			(at 54.61 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 54.61 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5221292"
+			(at 54.61 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
+			(at 54.61 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "2bbabb93-4374-43b4-8d69-6db580d3a45c")
+		)
+		(instances
+			(project ""
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
+					(reference "BT1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_01x01")
+		(at 54.61 104.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "5a6ec0c7-ef7b-4613-9be4-bc9f698bea05")
+		(property "Reference" "BT2"
+			(at 57.15 102.87 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "POGO BT+"
+			(at 57.15 105.41000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "puchi_pix_card:Pogo_YTC1P_D2.0"
+			(at 54.61 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 54.61 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5221292"
+			(at 54.61 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
+			(at 54.61 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "c0b4fa9a-3abf-4725-80bd-cf53f6bd2c1f")
+		)
+		(instances
+			(project ""
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
+					(reference "BT2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_01x01")
+		(at 34.29 93.98 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "d9c24931-35b7-4208-a214-a85d2eb94155")
+		(property "Reference" "BT3"
+			(at 31.75 92.71000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Value" "POGO BT-"
+			(at 31.75 95.25000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" "puchi_pix_card:Pogo_YTC1P_D2.0"
+			(at 34.29 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 34.29 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5221292"
+			(at 34.29 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
+			(at 34.29 93.98 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "5cc0243a-0421-442b-adb3-c8fadbb98ce3")
+		)
+		(instances
+			(project ""
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
+					(reference "BT3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_01x01")
+		(at 34.29 104.14 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "344f1860-a5f2-408f-a77e-339efb5e1895")
+		(property "Reference" "BT4"
+			(at 31.75 102.87 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Value" "POGO BT-"
+			(at 31.75 105.41000000000001 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" "puchi_pix_card:Pogo_YTC1P_D2.0"
+			(at 34.29 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 34.29 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC" "C5221292"
+			(at 34.29 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Pogo pin YIYUAN YTC1P-3515-01 (D2.0 SMD, working height 3.7mm), battery contact"
+			(at 34.29 104.14 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "81d8e192-60be-4bb1-ae7c-95c69facbe14")
+		)
+		(instances
+			(project ""
+				(path "/68e11f83-6621-4a95-99d2-cf3319172deb/fe5fa423-265d-4590-b32d-2202514db510"
+					(reference "BT4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(wire
+		(pts
+			(xy 49.53 93.98) (xy 49.53 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a95dd3ed-a366-4abf-8f87-02fef78ec01b")
+	)
+	(wire
+		(pts
+			(xy 49.53 99.06) (xy 49.53 104.14)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b5f5902e-2bb4-415c-b328-abe4075617fe")
+	)
+	(wire
+		(pts
+			(xy 39.37 93.98) (xy 39.37 99.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "43fe702c-a81d-4012-a13e-c65560fdea25")
+	)
+	(wire
+		(pts
+			(xy 39.37 99.06) (xy 39.37 104.14)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "54305585-1793-4eaa-8725-d53d5f6981b9")
+	)
+	(junction
+		(at 49.53 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "06829211-5d5a-4cca-be8a-c26b22df9c05")
+	)
+	(junction
+		(at 39.37 99.06)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "61fa611b-2606-4d4e-ae6a-32debc9005f1")
+	)
+	(global_label "VBAT"
+		(shape input)
+		(at 57.15 99.06 0)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "0ac48757-5e11-4930-ae1a-1bc110be4604")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 0 0 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
 			)
 		)
 	)

@@ -557,7 +557,7 @@
       },
       {
         "netclass": "POWER",
-        "pattern": "Net-(J2-Pin_1)"
+        "pattern": "+3V3S"
       },
       {
         "netclass": "POWER",
@@ -569,7 +569,7 @@
       },
       {
         "netclass": "POWER",
-        "pattern": "Net-(BT1-+)"
+        "pattern": "VBAT"
       },
       {
         "netclass": "POWER",
