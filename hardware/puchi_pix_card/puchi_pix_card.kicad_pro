@@ -573,6 +573,10 @@
       },
       {
         "netclass": "POWER",
+        "pattern": "Net-(BT1-Pin_1)"
+      },
+      {
+        "netclass": "POWER",
         "pattern": "Net-(U1-SW)"
       },
       {
