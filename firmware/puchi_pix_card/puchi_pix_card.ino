@@ -131,6 +131,10 @@ static uint32_t flashReadJedecId() {
 // 電源
 // =====================
 static void powerRailsOn() {
+  // SW1 は +3V3S 側だけを切るので昇圧の VIN は常に電池につながっている。
+  // USB 給電中に昇圧を入れると電池から給電してしまうため、先に VBUS を見る
+  vbusPresent = analogRead(PIN_VBUS_SENSE) > VBUS_PRESENT_ADC;
+  if (vbusPresent) return;
   digitalWrite(PIN_BOOST_EN, HIGH);   // +5V と +3V3P が立ち上がる
   delay(5);                            // TPS61023 ソフトスタート 700µs (p5)
 }
