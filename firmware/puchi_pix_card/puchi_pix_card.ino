@@ -1,12 +1,12 @@
 // puchi_pix_card: 16x16 RGB ピクセルアート表示ボード (STM32G0B1CBT6)
 // Build: GenG0, pnum=GENERIC_G0B1CBTX, usb=CDCgen (Serial=USB CDC), xserial=none
 //
-// 実機立ち上げ用スケッチ: テストパターン表示、KXTJ3 による motion wake、
+// 実機立ち上げ用スケッチ: テストパターン表示 (MBI5124, BCM 8bit)、KXTJ3 による motion wake、
 // NOR Flash の JEDEC ID 確認、電池/VBUS 電圧のモニタ。
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
-#include "mbi5153.h"
+#include "mbi5124.h"
 
 // =====================
 // ピン (hardware/puchi_pix_card/mcu.kicad_sch)
@@ -43,7 +43,7 @@ static bool vbusPresent = false;
 static volatile uint32_t lastActivityMs = 0;
 static uint32_t lastFrameMs = 0;
 static uint16_t animTick = 0;
-static uint16_t gamma14[256];
+static uint8_t gamma8[256];
 
 static inline void write8(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(KXTJ3_ADDR);
@@ -170,11 +170,11 @@ static void renderTestPattern(uint16_t tick) {
         r = g = b = 255;
       } else {
         hsvToRgb((uint8_t)(x * 8 + y * 8 + tick), r, g, b);
-        r /= 8; g /= 8; b /= 8;   // 立ち上げ時は暗めに
+        r /= 4; g /= 4; b /= 4;   // 立ち上げ時は暗めに
       }
-      mbiGray[0][y][x] = gamma14[r];
-      mbiGray[1][y][x] = gamma14[g];
-      mbiGray[2][y][x] = gamma14[b];
+      mbiGray[0][y][x] = gamma8[r];
+      mbiGray[1][y][x] = gamma8[g];
+      mbiGray[2][y][x] = gamma8[b];
     }
   }
 }
@@ -228,7 +228,7 @@ void setup() {
   Serial.begin(115200);
 
   for (uint16_t i = 0; i < 256; i++) {
-    gamma14[i] = (uint16_t)(powf(i / 255.0f, 2.2f) * 16383.0f + 0.5f);
+    gamma8[i] = (uint8_t)(powf(i / 255.0f, 2.2f) * 255.0f + 0.5f);
   }
 
   Wire.setSDA(PB_7);
