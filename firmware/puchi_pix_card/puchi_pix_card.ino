@@ -1,12 +1,15 @@
 // puchi_pix_card: 16x16 RGB ピクセルアート表示ボード (STM32G0B1CBT6)
-// Build: GenG0, pnum=GENERIC_G0B1CBTX, usb=CDCgen (Serial=USB CDC), xserial=none
+// Build: GenG0, pnum=GENERIC_G0B1CBTX, usb=none (USB stack in src/usb: MSC UF2 drive + CDC log), xserial=none
 //
-// 実機立ち上げ用スケッチ: テストパターン表示 (MBI5124, BCM 8bit)、KXTJ3 による motion wake、
-// NOR Flash の JEDEC ID 確認、電池/VBUS 電圧のモニタ。
+// NOR Flash 上のアニメーションペイロード (USB の UF2 ドライブ経由で書き込む) を
+// 表示 (MBI5124, BCM 8bit)、KXTJ3 による天地判定と motion wake、電池/VBUS 電圧のモニタ。
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
 #include "mbi5124.h"
+#include "w25q.h"
+#include "payload.h"
+#include "src/usb/puchi_usb.h"
 
 // =====================
 // ピン (hardware/puchi_pix_card/mcu.kicad_sch)
@@ -16,7 +19,6 @@ static constexpr uint32_t PIN_VBUS_SENSE = PA1;   // VBUS 10k/10k (R6/R7)
 static constexpr uint32_t PIN_VBAT_ADC   = PB1;   // 電池 1M/1M (R10/R11) + 100nF
 static constexpr uint32_t PIN_BOOST_EN   = PD2;   // TPS61023 EN (1M プルダウン)
 static constexpr uint32_t PIN_STATUS_LED = PD3;   // 1k → LED → GND
-static constexpr uint32_t PIN_FLASH_CS   = PA4;   // W25Q64 (SPI1: PA5/PA6/PA7)
 
 // =====================
 // KXTJ3 (I2C1: PB6/PB7)。レジスタ設定は puchi_pix (v1) と同じ
@@ -42,7 +44,6 @@ static constexpr uint16_t VBUS_PRESENT_ADC = (uint16_t)(1.5f / 3.3f * 4095);
 static bool vbusPresent = false;
 static volatile uint32_t lastActivityMs = 0;
 static uint32_t lastFrameMs = 0;
-static uint16_t animTick = 0;
 static uint8_t gamma8[256];
 
 static inline void write8(uint8_t reg, uint8_t val) {
@@ -96,35 +97,91 @@ static void wakeupCallback() {
 }
 
 // =====================
-// NOR Flash (W25Q64JV / GD25Q64 互換)
+// NOR 上のペイロード: [0..3] 'PPNR', [4..7] ペイロード長 (LE), [16..] ペイロード本体。
+// UF2 ドロップは USB 割り込みから 256B ページ単位で NOR に書かれ、最終ブロックで
+// フラグが立つ。読み出しは RAM に丸ごと展開してから再生する
 // =====================
-static void flashPinsBegin() {
-  SPI.setMOSI(PA_7);
-  SPI.setMISO(PA_6);
-  SPI.setSCLK(PA_5);
-  SPI.begin();
-  pinMode(PIN_FLASH_CS, OUTPUT);
-  digitalWrite(PIN_FLASH_CS, HIGH);
+static constexpr uint32_t NOR_MAGIC = 0x524E5050;   // 'PPNR'
+static constexpr uint32_t NOR_HEADER_LEN = 16;
+static bool payloadActive = false;
+static volatile bool norDirty = false;
+static uint32_t frameStartMs = 0;
+
+// ホストはブロックを順不同で書くことがあるので、受信済みをビットマップで数えて
+// 全ブロックが揃った時点で再読み込みする
+static constexpr uint32_t UF2_MAX_BLOCKS = (NOR_HEADER_LEN + PAYLOAD_MAX) / NOR_PAGE_SIZE + 1;
+static uint32_t uf2Seen[(UF2_MAX_BLOCKS + 31) / 32];
+static uint32_t uf2SeenCount = 0;
+static uint32_t uf2NumBlocks = 0;
+
+void puchiUsbOnUf2Block(const Uf2Block &block) {
+  if (block.payloadSize > NOR_PAGE_SIZE) return;
+  if (block.targetAddr % NOR_PAGE_SIZE != 0) return;
+  if (block.targetAddr + block.payloadSize > NOR_SIZE) return;
+  if (block.numBlocks > UF2_MAX_BLOCKS || block.blockNo >= block.numBlocks) return;
+  if (block.targetAddr % NOR_SECTOR_SIZE == 0) flashEraseSector(block.targetAddr);
+  flashProgramPage(block.targetAddr, block.data, block.payloadSize);
+
+  if (block.numBlocks != uf2NumBlocks) {
+    memset(uf2Seen, 0, sizeof(uf2Seen));
+    uf2SeenCount = 0;
+    uf2NumBlocks = block.numBlocks;
+  }
+  uint32_t bit = 1u << (block.blockNo & 31);
+  if (!(uf2Seen[block.blockNo >> 5] & bit)) {
+    uf2Seen[block.blockNo >> 5] |= bit;
+    uf2SeenCount++;
+  }
+  if (uf2SeenCount == uf2NumBlocks) {
+    uf2NumBlocks = 0;
+    norDirty = true;
+  }
 }
 
-// スリープ前に Hi-Z へ。NOR は +3V3P (昇圧断で消える) に載っているため、
-// 出力を残すと保護ダイオード経由で未給電の NOR に逆給電する
-static void flashPinsEnd() {
-  SPI.end();
-  pinMode(PIN_FLASH_CS, INPUT_ANALOG);
-  pinMode(PA5, INPUT_ANALOG); pinMode(PA6, INPUT_ANALOG); pinMode(PA7, INPUT_ANALOG);
+static void loadPayloadFromNor() {
+  norDirty = false;
+  HAL_NVIC_DisableIRQ(USB_UCPD1_2_IRQn);   // NOR は USB 割り込みからも書かれる
+  uint8_t hdr[NOR_HEADER_LEN];
+  flashRead(0, hdr, sizeof(hdr));
+  uint32_t magic, len;
+  memcpy(&magic, hdr, 4);
+  memcpy(&len, hdr + 4, 4);
+  payloadActive = false;
+  if (magic == NOR_MAGIC && len <= PAYLOAD_MAX) {
+    flashRead(NOR_HEADER_LEN, payloadBuf, len);
+    payloadActive = payloadValidate(len);
+  }
+  HAL_NVIC_EnableIRQ(USB_UCPD1_2_IRQn);
+  if (payloadActive) {
+    payloadJumpTo(0);
+    frameStartMs = millis();
+    Serial.print("payload: v"); Serial.print(payVer); Serial.print(' ');
+    Serial.print(payFrames); Serial.print(" frames, "); Serial.print(payloadLen); Serial.println(" bytes");
+  } else {
+    memset(mbiGray, 0, sizeof(mbiGray));
+    mbiUploadFrame();
+    Serial.println("payload: none");
+  }
 }
 
-static uint32_t flashReadJedecId() {
-  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(PIN_FLASH_CS, LOW);
-  SPI.transfer(0x9F);
-  uint32_t id = (uint32_t)SPI.transfer(0) << 16;
-  id |= (uint32_t)SPI.transfer(0) << 8;
-  id |= SPI.transfer(0);
-  digitalWrite(PIN_FLASH_CS, HIGH);
-  SPI.endTransaction();
-  return id;   // W25Q64JV: 0xEF4017, GD25Q64: 0xC84017
+// =====================
+// ROM の DFU ブートローダへ: 1200bps タッチでリセットし、起動直後に目印を見て
+// システムメモリ (0x1FFF0000) へ飛ぶ。目印はリセットで消えない .noinit に置く
+// =====================
+static constexpr uint32_t DFU_MAGIC = 0x44465521;   // 'DFU!'
+static uint32_t dfuMagic __attribute__((section(".noinit")));
+
+static void jumpToBootloader() {
+  HAL_RCC_DeInit();
+  HAL_DeInit();
+  SysTick->CTRL = 0;
+  SysTick->LOAD = 0;
+  SysTick->VAL = 0;
+  NVIC->ICER[0] = 0xFFFFFFFF;
+  NVIC->ICPR[0] = 0xFFFFFFFF;
+  const uint32_t* vec = (const uint32_t*)0x1FFF0000;
+  __set_MSP(vec[0]);
+  ((void (*)(void))vec[1])();
 }
 
 // =====================
@@ -148,37 +205,50 @@ static float readVoltage(uint32_t pin, float dividerRatio) {
 }
 
 // =====================
-// テストパターン: 虹のグラデーションが流れ、白い点がラスタ順に走る
-// (行/列/チャネル順の写像を目で確認する)
+// 表示: ペイロードのフレーム (RGB565) を重力の向きに合わせて回し、輝度とガンマをかける
 // =====================
-static void hsvToRgb(uint8_t h, uint8_t &r, uint8_t &g, uint8_t &b) {
-  uint8_t region = h / 43;
-  uint8_t rem = (h - region * 43) * 6;
-  uint8_t q = 255 - rem, t = rem;
-  switch (region) {
-    case 0: r = 255; g = t;   b = 0;   break;
-    case 1: r = q;   g = 255; b = 0;   break;
-    case 2: r = 0;   g = 255; b = t;   break;
-    case 3: r = 0;   g = q;   b = 255; break;
-    case 4: r = t;   g = 0;   b = 255; break;
-    default: r = 255; g = 0;  b = q;   break;
+static constexpr uint8_t IMG_BRIGHTNESS = 128;      // 0..255
+static uint8_t imgRot = 0;                          // 時計回り 90° 単位 (0..3)
+
+// 重力の向きから「どの辺が上か」を決めて画像を回す。実測: 上辺が上で ay≈-1g、
+// 左辺が上で ax≈-1g (センサ -Y=上辺, -X=左辺)。平置きや傾き不足は直前の向きを保持。
+static constexpr int16_t ORIENT_THRESHOLD = 9000;   // ≈0.55g (16384/g)
+static void updateOrientation() {
+  int16_t ax, ay, az;
+  if (!readXYZRaw(ax, ay, az)) return;
+  uint8_t cand;
+  if (abs(ay) >= abs(ax)) {
+    if (abs(ay) < ORIENT_THRESHOLD) return;
+    cand = ay < 0 ? 0 : 2;          // 上辺が上 / 下辺が上
+  } else {
+    if (abs(ax) < ORIENT_THRESHOLD) return;
+    cand = ax < 0 ? 3 : 1;          // 左辺が上 / 右辺が上
   }
+  static uint8_t pending = 0, count = 0;
+  if (cand != pending) { pending = cand; count = 0; }
+  if (count < 3) { count++; return; }
+  imgRot = cand;
 }
 
-static void renderTestPattern(uint16_t tick) {
-  uint16_t dot = (tick / 4) % (MATRIX_W * MATRIX_H);
+static void renderFrame(uint32_t now) {
+  if (now - frameStartMs >= payloadDuration()) {
+    frameStartMs = now;
+    payloadAdvance();
+  }
   for (uint8_t y = 0; y < MATRIX_H; y++) {
     for (uint8_t x = 0; x < MATRIX_W; x++) {
-      uint8_t r, g, b;
-      if (y * MATRIX_W + x == dot) {
-        r = g = b = 255;
-      } else {
-        hsvToRgb((uint8_t)(x * 8 + y * 8 + tick), r, g, b);
-        r /= 4; g /= 4; b /= 4;   // 立ち上げ時は暗めに
+      uint8_t sx, sy;
+      switch (imgRot) {
+        case 1:  sx = y;                sy = MATRIX_W - 1 - x; break;   // 画像の上を右辺へ
+        case 2:  sx = MATRIX_W - 1 - x; sy = MATRIX_H - 1 - y; break;
+        case 3:  sx = MATRIX_H - 1 - y; sy = x;                break;   // 画像の上を左辺へ
+        default: sx = x;                sy = y;                break;
       }
-      mbiGray[0][y][x] = gamma8[r];
-      mbiGray[1][y][x] = gamma8[g];
-      mbiGray[2][y][x] = gamma8[b];
+      uint16_t c = payFrame565[sy * PAYLOAD_SIZE + sx];
+      uint8_t r = (c >> 8) & 0xF8, g = (c >> 3) & 0xFC, b = (c << 3) & 0xF8;
+      mbiGray[0][y][x] = gamma8[(r * IMG_BRIGHTNESS) >> 8];
+      mbiGray[1][y][x] = gamma8[(g * IMG_BRIGHTNESS) >> 8];
+      mbiGray[2][y][x] = gamma8[(b * IMG_BRIGHTNESS) >> 8];
     }
   }
 }
@@ -224,12 +294,16 @@ static void enterSleep() {
 }
 
 void setup() {
+  if (dfuMagic == DFU_MAGIC) {
+    dfuMagic = 0;
+    jumpToBootloader();
+  }
   pinMode(PIN_STATUS_LED, OUTPUT);
   pinMode(PIN_BOOST_EN, OUTPUT);
   digitalWrite(PIN_BOOST_EN, LOW);
   analogReadResolution(12);
 
-  Serial.begin(115200);
+  puchiUsbBegin();
 
   for (uint16_t i = 0; i < 256; i++) {
     gamma8[i] = (uint8_t)(powf(i / 255.0f, 2.2f) * 255.0f + 0.5f);
@@ -247,10 +321,12 @@ void setup() {
 
   powerRailsOn();
   flashPinsBegin();
+  Serial.println("puchi_pix_card build " __DATE__ " " __TIME__);
   Serial.print("flash jedec id: 0x");
   Serial.println(flashReadJedecId(), HEX);
 
   mbiBegin();
+  loadPayloadFromNor();
   digitalWrite(PIN_STATUS_LED, HIGH);
   lastActivityMs = millis();
   lastFrameMs = millis();
@@ -283,9 +359,21 @@ void loop() {
     return;
   }
 
-  if (now - lastFrameMs >= FRAME_MS) {
+  static uint32_t lastOrientMs = 0;
+  if (now - lastOrientMs >= 100) {
+    lastOrientMs = now;
+    updateOrientation();
+  }
+
+  if (puchiUsbDfuRequested()) {
+    dfuMagic = DFU_MAGIC;
+    NVIC_SystemReset();
+  }
+  if (norDirty) loadPayloadFromNor();
+
+  if (payloadActive && now - lastFrameMs >= FRAME_MS) {
     lastFrameMs = now;
-    renderTestPattern(animTick++);
+    renderFrame(now);
     mbiUploadFrame();
   }
 
