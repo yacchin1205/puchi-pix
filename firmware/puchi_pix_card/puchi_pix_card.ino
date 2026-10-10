@@ -1,8 +1,9 @@
 // puchi_pix_card: 16x16 RGB ピクセルアート表示ボード (STM32G0B1CBT6)
 // Build: GenG0, pnum=GENERIC_G0B1CBTX, usb=none (USB stack in src/usb: MSC UF2 drive + CDC log), xserial=none
 //
-// NOR Flash 上のアニメーションペイロード (USB の UF2 ドライブ経由で書き込む) を
-// 表示 (MBI5124, BCM 8bit)、KXTJ3 による天地判定と motion wake、電池/VBUS 電圧のモニタ。
+// NOR Flash 上のアニメーションペイロード (USB の UF2 ドライブ経由でスロットに書き込む) を
+// 表示 (MBI5124, BCM 8bit)、KXTJ3 による天地判定・シェイクでのスロット切替・motion wake、
+// 電池/VBUS 電圧のモニタ。
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -96,15 +97,61 @@ static void wakeupCallback() {
   lastActivityMs = millis();
 }
 
+// シェイク: 50Hz で加速度を読み、200ms ローパスからの瞬時偏差が SHAKE_THRESH を超える
+// サンプルが SHAKE_DEBOUNCE 回続いたら 1 回とみなす (判定は puchi_pix_esp32 と同じ。
+// 静置時の偏差は 700 以下)。ESP32 版の 8000 × 3 回では歩行中にも発火したため、
+// 意図的に振った時だけ通るよう閾値と連続回数を上げている。振り続けている間に
+// 連発しないよう、発火後 SHAKE_HOLDOFF_MS は再発火しない
+static constexpr uint32_t ACCEL_SAMPLE_MS = 20;
+static constexpr int32_t ACCEL_LP_DIV = 10;        // 20ms / 200ms
+static constexpr int32_t SHAKE_THRESH = 14000;     // ≈0.85g
+static constexpr uint8_t SHAKE_DEBOUNCE = 6;       // 120ms
+static constexpr uint32_t SHAKE_HOLDOFF_MS = 1000;
+static int32_t accLp[3];                           // <<8 固定小数
+static bool accLpSeeded = false;
+static uint8_t shakeStreak = 0;
+static uint32_t lastShakeMs = 0;
+static int32_t accDevMax = 0;                      // 直近の報告以降の最大偏差 (閾値調整用)
+
+static bool detectShake(uint32_t now) {
+  int16_t raw[3];
+  if (!readXYZRaw(raw[0], raw[1], raw[2])) return false;
+  bool spike = false;
+  for (uint8_t i = 0; i < 3; i++) {
+    int32_t v = (int32_t)raw[i] << 8;
+    if (!accLpSeeded) accLp[i] = v;
+    int32_t dev = labs(v - accLp[i]) >> 8;
+    if (dev > accDevMax) accDevMax = dev;
+    if (dev > SHAKE_THRESH) spike = true;
+    accLp[i] += (v - accLp[i]) / ACCEL_LP_DIV;
+  }
+  accLpSeeded = true;
+  if (spike) {
+    if (shakeStreak < SHAKE_DEBOUNCE) shakeStreak++;
+  } else {
+    shakeStreak = 0;
+  }
+  if (shakeStreak < SHAKE_DEBOUNCE || now - lastShakeMs < SHAKE_HOLDOFF_MS) return false;
+  lastShakeMs = now;
+  return true;
+}
+
 // =====================
-// NOR 上のペイロード: [0..3] 'PPNR', [4..7] ペイロード長 (LE), [16..] ペイロード本体。
+// NOR 上のペイロード: 64KiB 刻みのスロットに 1 本ずつ。スロット先頭は
+// [0..3] 'PPNR', [4..7] ペイロード長 (LE), [16..] ペイロード本体。
 // UF2 ドロップは USB 割り込みから 256B ページ単位で NOR に書かれ、最終ブロックで
-// フラグが立つ。読み出しは RAM に丸ごと展開してから再生する
+// フラグが立つ。読み出しは RAM に丸ごと展開してから再生する。
+// 'PPNR' 以外で始まるスロットは空き (アップローダーの消去は先頭ページを 0 で埋める)
 // =====================
 static constexpr uint32_t NOR_MAGIC = 0x524E5050;   // 'PPNR'
 static constexpr uint32_t NOR_HEADER_LEN = 16;
+static constexpr uint32_t SLOT_STRIDE = 65536;
+static constexpr uint8_t SLOT_COUNT = 8;
+static uint8_t slotUsed = 0;                        // bit s = スロット s にペイロードあり
+static uint8_t curSlot = 0;
 static bool payloadActive = false;
 static volatile bool norDirty = false;
+static volatile uint8_t dirtySlot = 0;
 static uint32_t frameStartMs = 0;
 
 // ホストはブロックを順不同で書くことがあるので、受信済みをビットマップで数えて
@@ -117,7 +164,7 @@ static uint32_t uf2NumBlocks = 0;
 void puchiUsbOnUf2Block(const Uf2Block &block) {
   if (block.payloadSize > NOR_PAGE_SIZE) return;
   if (block.targetAddr % NOR_PAGE_SIZE != 0) return;
-  if (block.targetAddr + block.payloadSize > NOR_SIZE) return;
+  if (block.targetAddr / SLOT_STRIDE >= SLOT_COUNT) return;
   if (block.numBlocks > UF2_MAX_BLOCKS || block.blockNo >= block.numBlocks) return;
   if (block.targetAddr % NOR_SECTOR_SIZE == 0) flashEraseSector(block.targetAddr);
   flashProgramPage(block.targetAddr, block.data, block.payloadSize);
@@ -134,33 +181,89 @@ void puchiUsbOnUf2Block(const Uf2Block &block) {
   }
   if (uf2SeenCount == uf2NumBlocks) {
     uf2NumBlocks = 0;
+    dirtySlot = block.targetAddr / SLOT_STRIDE;
     norDirty = true;
   }
 }
 
-static void loadPayloadFromNor() {
-  norDirty = false;
-  HAL_NVIC_DisableIRQ(USB_UCPD1_2_IRQn);   // NOR は USB 割り込みからも書かれる
-  uint8_t hdr[NOR_HEADER_LEN];
-  flashRead(0, hdr, sizeof(hdr));
+// NOR は USB 割り込みからも書かれるので、メインループからの読み出しは割り込みを止めて行う
+static void norRead(uint32_t addr, uint8_t* buf, uint32_t len) {
+  HAL_NVIC_DisableIRQ(USB_UCPD1_2_IRQn);
+  flashRead(addr, buf, len);
+  HAL_NVIC_EnableIRQ(USB_UCPD1_2_IRQn);
+}
+
+static inline uint32_t slotAddr(uint8_t s) {
+  return (uint32_t)s * SLOT_STRIDE;
+}
+
+// ヘッダだけでペイロードの有無を見る。本体の検証は読み込む時
+static uint32_t slotPayloadLen(uint8_t s) {
+  uint8_t hdr[8];
+  norRead(slotAddr(s), hdr, sizeof(hdr));
   uint32_t magic, len;
   memcpy(&magic, hdr, 4);
   memcpy(&len, hdr + 4, 4);
-  payloadActive = false;
-  if (magic == NOR_MAGIC && len <= PAYLOAD_MAX) {
-    flashRead(NOR_HEADER_LEN, payloadBuf, len);
-    payloadActive = payloadValidate(len);
+  return (magic == NOR_MAGIC && len > 0 && len <= PAYLOAD_MAX) ? len : 0;
+}
+
+static void updateSlotUsed(uint8_t s) {
+  if (slotPayloadLen(s)) slotUsed |= (uint8_t)(1 << s);
+  else slotUsed &= (uint8_t)~(1 << s);
+}
+
+// from の次に使われているスロット (一周して from 自身まで)。slotUsed != 0 が前提
+static uint8_t nextUsedSlot(uint8_t from) {
+  for (uint8_t i = 1; i <= SLOT_COUNT; i++) {
+    uint8_t s = (from + i) % SLOT_COUNT;
+    if (slotUsed & (1 << s)) return s;
   }
-  HAL_NVIC_EnableIRQ(USB_UCPD1_2_IRQn);
+  __builtin_unreachable();
+}
+
+static void showSlot(uint8_t s) {
+  curSlot = s;
+  uint32_t len = slotPayloadLen(s);
+  norRead(slotAddr(s) + NOR_HEADER_LEN, payloadBuf, len);
+  payloadActive = payloadValidate(len);
+  Serial.print("slot "); Serial.print(s); Serial.print(": ");
   if (payloadActive) {
     payloadJumpTo(0);
     frameStartMs = millis();
-    Serial.print("payload: v"); Serial.print(payVer); Serial.print(' ');
+    Serial.print('v'); Serial.print(payVer); Serial.print(' ');
     Serial.print(payFrames); Serial.print(" frames, "); Serial.print(payloadLen); Serial.println(" bytes");
   } else {
     memset(mbiGray, 0, sizeof(mbiGray));
     mbiUploadFrame();
-    Serial.println("payload: none");
+    Serial.println("invalid payload");
+  }
+}
+
+static void showNothing() {
+  payloadActive = false;
+  memset(mbiGray, 0, sizeof(mbiGray));
+  mbiUploadFrame();
+  Serial.println("payload: none");
+}
+
+static void scanSlots() {
+  for (uint8_t s = 0; s < SLOT_COUNT; s++) updateSlotUsed(s);
+  Serial.print("slots:");
+  for (uint8_t s = 0; s < SLOT_COUNT; s++) if (slotUsed & (1 << s)) { Serial.print(' '); Serial.print(s); }
+  Serial.println();
+  if (slotUsed) showSlot(nextUsedSlot(SLOT_COUNT - 1));   // 最小番号のスロットから
+  else showNothing();
+}
+
+// ドロップ完了: 書かれたスロットを見せる。消去されたのが表示中のスロットなら次へ
+static void reloadAfterDrop() {
+  norDirty = false;
+  uint8_t s = dirtySlot;
+  updateSlotUsed(s);
+  if (slotUsed & (1 << s)) showSlot(s);
+  else if (s == curSlot) {
+    if (slotUsed) showSlot(nextUsedSlot(curSlot));
+    else showNothing();
   }
 }
 
@@ -308,6 +411,7 @@ static void enterSleep() {
   powerRailsOn();
   flashPinsBegin();
   lastActivityMs = millis();
+  accLpSeeded = false;
   setDisplay(true);
 }
 
@@ -345,7 +449,7 @@ void setup() {
 
   lastActivityMs = millis();
   setDisplay(true);
-  loadPayloadFromNor();
+  scanSlots();
   digitalWrite(PIN_STATUS_LED, HIGH);
 }
 
@@ -375,12 +479,26 @@ void loop() {
     NVIC_SystemReset();
   }
   if (norDirty) {
-    loadPayloadFromNor();
+    reloadAfterDrop();
     lastActivityMs = now;   // 書き込まれたものをすぐ見せる
   }
 
-  // USB 接続中はスリープしない (レビュー M5: ホストから見て応答不能になる)
-  bool idle = now - lastActivityMs >= IDLE_TIMEOUT_MS;
+  static uint32_t lastAccelMs = 0;
+  if (now - lastAccelMs >= ACCEL_SAMPLE_MS) {
+    lastAccelMs = now;
+    if (detectShake(now)) {
+      lastActivityMs = now;
+      // 消灯中のシェイクは再点灯だけ。切り替え先がなければそのまま
+      if (displayOn && (slotUsed & (slotUsed - 1))) {
+        Serial.println("shake");
+        showSlot(nextUsedSlot(curSlot));
+      }
+    }
+  }
+
+  // USB 接続中はスリープしない (レビュー M5: ホストから見て応答不能になる)。
+  // lastActivityMs は割り込みで now より新しくなりうるので、差は符号付きで見る
+  bool idle = (int32_t)(now - lastActivityMs) >= (int32_t)IDLE_TIMEOUT_MS;
   if (idle && !vbusPresent) {
     enterSleep();
     return;
@@ -409,6 +527,7 @@ void loop() {
     Serial.print(" acc=");
     if (ok) { Serial.print(ax); Serial.print(','); Serial.print(ay); Serial.print(','); Serial.print(az); }
     else Serial.print("err");
-    Serial.println();
+    Serial.print(" dev="); Serial.println(accDevMax);
+    accDevMax = 0;
   }
 }
