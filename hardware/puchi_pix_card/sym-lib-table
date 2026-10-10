@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "puchi_pix_card")(type "KiCad")(uri "${KIPRJMOD}/puchi_pix_card.kicad_sym")(options "")(descr "puchi_pix_card project symbols"))
+)

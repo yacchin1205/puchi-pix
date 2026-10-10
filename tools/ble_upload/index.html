@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>puchi-pix BLE upload</title>
+  <title>puchi-pix upload</title>
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
@@ -119,15 +119,25 @@
   </style>
 </head>
 <body>
-  <h1>puchi-pix BLE upload</h1>
+  <h1>puchi-pix upload</h1>
   <p class="intro-link"><a id="intro-link" href="INTRO-ja.html">Puchi-Pix(ぷちぴく)とは</a></p>
 
   <div class="row">
-    <button id="connect">Connect</button>
-    <button id="disconnect" disabled>Disconnect</button>
-    <button id="revert" disabled>Revert to default</button>
-    <span id="conn-status" class="pill">未接続</span>
-    <span id="upload-status" class="pill">idle</span>
+    <select id="device">
+      <option value="esp32" selected>Puchi-Pix ESP32 (Bluetooth)</option>
+      <option value="card">Puchi-Pix card (USB drive, .uf2)</option>
+    </select>
+    <span id="ble-ui">
+      <button id="connect">Connect</button>
+      <button id="disconnect" disabled>Disconnect</button>
+      <button id="revert" disabled>Revert to default</button>
+      <span id="conn-status" class="pill">未接続</span>
+      <span id="upload-status" class="pill">idle</span>
+    </span>
+    <span id="uf2-ui" hidden>
+      <button id="dl-uf2" disabled>Download .uf2</button>
+      <button id="write-drive" disabled hidden>Write to drive</button>
+    </span>
   </div>
 
   <div class="row">
@@ -135,6 +145,7 @@
     <label><span id="bg-label">背景色</span> <input type="color" id="bg" value="#000000"></label>
     <select id="size">
       <option value="auto" selected>サイズ自動</option>
+      <option value="16">16×16</option>
       <option value="64">64×64</option>
       <option value="120">120×120</option>
       <option value="128">128×128</option>
@@ -227,7 +238,13 @@
     // PackBits: control c < 128 = copy next c+1 bytes; c > 128 = repeat next
     // byte 257-c times. 4bpp data is RLE'd on the packed bytes.
     // No fixed frame cap; the whole payload must fit the firmware buffer.
-    const UPLOAD_BUF = 98368;
+    // Per-device limits: the whole payload must fit the firmware buffer.
+    // card plays 16x16 only and receives the payload as a .uf2 drop.
+    const TARGETS = {
+      esp32: { buf: 98368 },
+      card:  { buf: 32768, size: 16, uf2Family: 0x50784361 },
+    };
+    const target = () => TARGETS[$('device').value];
     const CHUNK_SIZE  = 200;                 // BLE write chunk
     const PAYLOAD_VERSION = 6;               // version this tool emits
     const MOTION_BLOCK_BYTES = 16;           // embedded motion block length
@@ -240,6 +257,11 @@
         statusNames: ['idle', 'receiving', 'success', 'error'],
         bgLabel: 'Background', bgTitle: 'Fill color for transparent areas and disposal clears',
         sizeAuto: 'Auto size', size128: '128×128 (outer 4px hidden)',
+        deviceEsp32: 'Puchi-Pix ESP32 (Bluetooth)', deviceCard: 'Puchi-Pix card (USB drive, .uf2)',
+        downloadUf2: 'Download .uf2', writeDrive: 'Write to PUCHIPIX drive',
+        logUf2Saved: (n, b, k) => `${n}: ${b} bytes (${k} blocks) — drop it on the PUCHIPIX drive`,
+        logDriveWritten: n => `written: ${n}`,
+        logDriveError: m => `drive write error: ${m}`,
         colors16: '16 colors (4bit)', colors256: '256 colors (8bit)',
         upload: 'Upload', revert: 'Revert to default',
         rangeLabel: 'Frame range',
@@ -305,6 +327,11 @@
         statusNames: ['待機中', '受信中', '成功', 'エラー'],
         bgLabel: '背景色', bgTitle: '透明部分とdisposalクリアの塗り色',
         sizeAuto: 'サイズ自動', size128: '128×128 (端4pxは表示外)',
+        deviceEsp32: 'Puchi-Pix ESP32 (Bluetooth)', deviceCard: 'Puchi-Pix card (USB ドライブ, .uf2)',
+        downloadUf2: '.uf2 をダウンロード', writeDrive: 'PUCHIPIX ドライブに書き込む',
+        logUf2Saved: (n, b, k) => `${n}: ${b} バイト (${k}ブロック) — PUCHIPIX ドライブに落としてください`,
+        logDriveWritten: n => `書き込みました: ${n}`,
+        logDriveError: m => `ドライブ書き込みエラー: ${m}`,
         colors16: '16色 (4bit)', colors256: '256色 (8bit)',
         upload: 'アップロード', revert: 'デフォルトに戻す',
         rangeLabel: 'フレーム範囲',
@@ -393,8 +420,12 @@
     $('upload-status').textContent = T.statusNames[0];
     $('bg-label').textContent = T.bgLabel;
     $('bg').title = T.bgTitle;
+    $('device').options[0].textContent = T.deviceEsp32;
+    $('device').options[1].textContent = T.deviceCard;
     $('size').options[0].textContent = T.sizeAuto;
-    $('size').options[3].textContent = T.size128;
+    $('size').options[4].textContent = T.size128;
+    $('dl-uf2').textContent = T.downloadUf2;
+    $('write-drive').textContent = T.writeDrive;
     $('colors').options[0].textContent = T.colors16;
     $('colors').options[1].textContent = T.colors256;
     $('upload').textContent = T.upload;
@@ -420,6 +451,7 @@
     if (!navigator.bluetooth) {
       const div = document.createElement('div');
       div.className = 'warn';
+      div.id = 'ble-warn';
       div.textContent = T.noBluetooth;
       document.body.prepend(div);
     }
@@ -908,7 +940,7 @@
     const pvSpriteSize = () => {
       const sel = $('size').value;
       const { W, H } = lastComposed;
-      return (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
+      return target().size ?? ((sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10));
     };
 
     const pvHighlight = (f) => {
@@ -1183,6 +1215,7 @@
         log(T.logParseError(err.message));
         payload = null;
       }
+      $('dl-uf2').disabled = $('write-drive').disabled = (payload === null);
       return true;
     };
 
@@ -1227,6 +1260,7 @@
         log(T.logRebuildError(err.message));
         payload = null;
       }
+      $('dl-uf2').disabled = $('write-drive').disabled = (payload === null);
     };
     $('size').addEventListener('change', rebuild);
     $('colors').addEventListener('change', rebuild);
@@ -1340,6 +1374,79 @@
         log(T.logUploadError(e.message));
       } finally {
         $('upload').disabled = false;
+      }
+    });
+
+    // ---- Device selection ----
+    const applyDevice = () => {
+      const card = $('device').value === 'card';
+      $('ble-ui').hidden = card;
+      $('uf2-ui').hidden = !card;
+      const warn = $('ble-warn');
+      if (warn) warn.hidden = card;
+      $('size').disabled = card;
+      if (card) $('size').value = '16';
+      $('write-drive').hidden = !(card && window.showDirectoryPicker);
+      rebuild();
+    };
+    $('device').addEventListener('change', applyDevice);
+    applyDevice();
+
+    // ---- UF2 (card) ----
+    // NOR image = 'PPNR' + uint32 payload length + 8 reserved + payload,
+    // carried as UF2 blocks of 256 B at consecutive NOR addresses.
+    const buildUf2 = (pay) => {
+      const image = new Uint8Array(16 + pay.length);
+      image.set([0x50, 0x50, 0x4E, 0x52]);
+      new DataView(image.buffer).setUint32(4, pay.length, true);
+      image.set(pay, 16);
+      const n = Math.ceil(image.length / 256);
+      const out = new Uint8Array(n * 512);
+      for (let i = 0; i < n; i++) {
+        const v = new DataView(out.buffer, i * 512, 512);
+        const chunk = image.subarray(i * 256, Math.min((i + 1) * 256, image.length));
+        v.setUint32(0, 0x0A324655, true);
+        v.setUint32(4, 0x9E5D5157, true);
+        v.setUint32(8, 0x2000, true);            // family id present
+        v.setUint32(12, i * 256, true);
+        v.setUint32(16, chunk.length, true);
+        v.setUint32(20, i, true);
+        v.setUint32(24, n, true);
+        v.setUint32(28, target().uf2Family, true);
+        out.set(chunk, i * 512 + 32);
+        v.setUint32(508, 0x0AB16F30, true);
+      }
+      return out;
+    };
+    const uf2Name = () => lastFile.name.replace(/\.[^.]+$/, '') + '.uf2';
+
+    $('dl-uf2').addEventListener('click', () => {
+      if (!payload) return;
+      const uf2 = buildUf2(payload);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([uf2], { type: 'application/octet-stream' }));
+      a.download = uf2Name();
+      a.click();
+      URL.revokeObjectURL(a.href);
+      log(T.logUf2Saved(a.download, uf2.length, uf2.length / 512));
+    });
+
+    // Chromium only: write straight into the mounted PUCHIPIX volume. The
+    // handle is kept for the session; any failure drops it so the next click
+    // asks for the folder again.
+    let driveDir = null;
+    $('write-drive').addEventListener('click', async () => {
+      if (!payload) return;
+      try {
+        if (!driveDir) driveDir = await window.showDirectoryPicker({ mode: 'readwrite' });
+        const fh = await driveDir.getFileHandle(uf2Name(), { create: true });
+        const w = await fh.createWritable();
+        await w.write(buildUf2(payload));
+        await w.close();
+        log(T.logDriveWritten(driveDir.name + '/' + uf2Name()));
+      } catch (e) {
+        driveDir = null;
+        log(T.logDriveError(e.message));
       }
     });
 
@@ -1505,7 +1612,7 @@
       // larger than 64. 128 stays selectable for native-128 pixel art where
       // edge cropping beats non-integer resampling.
       const sel = $('size').value;
-      const size = (sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10);
+      const size = target().size ?? ((sel === 'auto') ? ((W > 64 || H > 64) ? 120 : 64) : parseInt(sel, 10));
       const K = parseInt($('colors').value, 10);      // 16 or 256
       const bpp = (K === 256) ? 8 : 4;
       $('prev-label').textContent = T.prevLabel(size, K);
@@ -1655,8 +1762,8 @@
           1 + r.rects.reduce((a, rc) => a + 6 + rc.rle.length, 0));
       const total = 8 + MOTION_BLOCK_BYTES + palBytes +
         records.reduce((a, r) => a + recSize(r), 0);
-      if (total > UPLOAD_BUF) {
-        throw new Error(T.errTooBig(total, UPLOAD_BUF, N, size, K));
+      if (total > target().buf) {
+        throw new Error(T.errTooBig(total, target().buf, N, size, K));
       }
 
       const out = new Uint8Array(total);

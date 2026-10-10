@@ -1,0 +1,4 @@
+puchi_pix_card-backups/
+production/backups/
+fp-info-cache
+*.lck
