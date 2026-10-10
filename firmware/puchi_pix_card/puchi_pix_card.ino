@@ -35,7 +35,7 @@ static const uint8_t REG_WU_COUNTER = 0x29;
 static const uint8_t REG_WUTH_H     = 0x6A;
 static const uint8_t REG_WUTH_L     = 0x6B;
 
-static constexpr uint32_t SLEEP_TIMEOUT_MS = 30000;
+static constexpr uint32_t IDLE_TIMEOUT_MS = 30000;   // 無動作でここまで経つと消灯 (電池ならスリープ)
 static constexpr uint32_t FRAME_MS = 33;
 
 // USB 検出: VBUS 3.0V (ピン 1.5V) 以上で「あり」。D1 の逆リークでノードが
@@ -254,6 +254,25 @@ static void renderFrame(uint32_t now) {
 }
 
 // =====================
+// 消灯: 無動作が続いたらマトリクスの駆動を止める。USB 給電中はホストへの応答を
+// 保つためここまでで、電池ならさらにスリープへ進む。動きを検出したら再点灯する。
+// =====================
+static bool displayOn = false;
+
+static void setDisplay(bool on) {
+  if (on == displayOn) return;
+  displayOn = on;
+  if (on) {
+    mbiBegin();
+    frameStartMs = millis();
+    lastFrameMs = frameStartMs;
+  } else {
+    mbiEnd();
+  }
+  Serial.println(on ? "display on" : "display off");
+}
+
+// =====================
 // スリープ: 昇圧を止めて +5V/+3V3P ドメインごと落とし、Stop1 で KXTJ3 の
 // INT (PA0, EXTI) を待つ。復帰後は MBI の設定が消えているので再初期化する。
 // =====================
@@ -262,7 +281,7 @@ extern "C" void SystemClock_Config(void);
 static void enterSleep() {
   Serial.println("sleep");
   Serial.flush();
-  mbiEnd();
+  setDisplay(false);
   flashPinsEnd();
   powerRailsOff();
   digitalWrite(PIN_STATUS_LED, LOW);
@@ -288,9 +307,8 @@ static void enterSleep() {
   write8(REG_CTRL1, 0xC2); delay(50);
   powerRailsOn();
   flashPinsBegin();
-  mbiBegin();
   lastActivityMs = millis();
-  lastFrameMs = millis();
+  setDisplay(true);
 }
 
 void setup() {
@@ -325,11 +343,10 @@ void setup() {
   Serial.print("flash jedec id: 0x");
   Serial.println(flashReadJedecId(), HEX);
 
-  mbiBegin();
+  lastActivityMs = millis();
+  setDisplay(true);
   loadPayloadFromNor();
   digitalWrite(PIN_STATUS_LED, HIGH);
-  lastActivityMs = millis();
-  lastFrameMs = millis();
 }
 
 void loop() {
@@ -353,11 +370,22 @@ void loop() {
     }
   }
 
+  if (puchiUsbDfuRequested()) {
+    dfuMagic = DFU_MAGIC;
+    NVIC_SystemReset();
+  }
+  if (norDirty) {
+    loadPayloadFromNor();
+    lastActivityMs = now;   // 書き込まれたものをすぐ見せる
+  }
+
   // USB 接続中はスリープしない (レビュー M5: ホストから見て応答不能になる)
-  if (!vbusPresent && now - lastActivityMs >= SLEEP_TIMEOUT_MS) {
+  bool idle = now - lastActivityMs >= IDLE_TIMEOUT_MS;
+  if (idle && !vbusPresent) {
     enterSleep();
     return;
   }
+  setDisplay(!idle);
 
   static uint32_t lastOrientMs = 0;
   if (now - lastOrientMs >= 100) {
@@ -365,13 +393,7 @@ void loop() {
     updateOrientation();
   }
 
-  if (puchiUsbDfuRequested()) {
-    dfuMagic = DFU_MAGIC;
-    NVIC_SystemReset();
-  }
-  if (norDirty) loadPayloadFromNor();
-
-  if (payloadActive && now - lastFrameMs >= FRAME_MS) {
+  if (displayOn && payloadActive && now - lastFrameMs >= FRAME_MS) {
     lastFrameMs = now;
     renderFrame(now);
     mbiUploadFrame();
