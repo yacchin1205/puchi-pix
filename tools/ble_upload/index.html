@@ -135,8 +135,10 @@
       <span id="upload-status" class="pill">idle</span>
     </span>
     <span id="uf2-ui" hidden>
+      <label><span id="slot-label">スロット</span> <select id="slot"></select></label>
       <button id="dl-uf2" disabled>Download .uf2</button>
       <button id="write-drive" disabled hidden>Write to drive</button>
+      <button id="clear-slot">スロットを消去</button>
     </span>
   </div>
 
@@ -185,7 +187,7 @@
     </label>
   </div>
 
-  <div class="row">
+  <div class="row" id="motion-row">
     <label><input type="checkbox" id="m-loop" checked disabled> <span id="m-loop-label">単純ループ</span></label>
     <label id="m-speed-wrap" hidden><span id="m-speed-label">移動速度 (px/s)</span>
       <input type="number" id="m-speed" min="0" max="255" value="60" style="width: 4.5em"></label>
@@ -239,12 +241,15 @@
     // byte 257-c times. 4bpp data is RLE'd on the packed bytes.
     // No fixed frame cap; the whole payload must fit the firmware buffer.
     // Per-device limits: the whole payload must fit the firmware buffer.
-    // card plays 16x16 only and receives the payload as a .uf2 drop.
+    // card plays 16x16 only and receives the payload as a .uf2 drop into one
+    // of its NOR slots (64 KiB apart); shaking the card steps to the next
+    // occupied slot.
     const TARGETS = {
       esp32: { buf: 98368 },
-      card:  { buf: 32768, size: 16, uf2Family: 0x50784361 },
+      card:  { buf: 32768, size: 16, uf2Family: 0x50784361, slots: 8, slotStride: 65536 },
     };
     const target = () => TARGETS[$('device').value];
+    const isCard = () => $('device').value === 'card';
     const CHUNK_SIZE  = 200;                 // BLE write chunk
     const PAYLOAD_VERSION = 6;               // version this tool emits
     const MOTION_BLOCK_BYTES = 16;           // embedded motion block length
@@ -259,6 +264,7 @@
         sizeAuto: 'Auto size', size128: '128×128 (outer 4px hidden)',
         deviceEsp32: 'Puchi-Pix ESP32 (Bluetooth)', deviceCard: 'Puchi-Pix card (USB drive, .uf2)',
         downloadUf2: 'Download .uf2', writeDrive: 'Write to PUCHIPIX drive',
+        slotLabel: 'Slot', clearSlot: 'Clear slot',
         logUf2Saved: (n, b, k) => `${n}: ${b} bytes (${k} blocks) — drop it on the PUCHIPIX drive`,
         logDriveWritten: n => `written: ${n}`,
         logDriveError: m => `drive write error: ${m}`,
@@ -329,6 +335,7 @@
         sizeAuto: 'サイズ自動', size128: '128×128 (端4pxは表示外)',
         deviceEsp32: 'Puchi-Pix ESP32 (Bluetooth)', deviceCard: 'Puchi-Pix card (USB ドライブ, .uf2)',
         downloadUf2: '.uf2 をダウンロード', writeDrive: 'PUCHIPIX ドライブに書き込む',
+        slotLabel: 'スロット', clearSlot: 'スロットを消去',
         logUf2Saved: (n, b, k) => `${n}: ${b} バイト (${k}ブロック) — PUCHIPIX ドライブに落としてください`,
         logDriveWritten: n => `書き込みました: ${n}`,
         logDriveError: m => `ドライブ書き込みエラー: ${m}`,
@@ -426,6 +433,8 @@
     $('size').options[4].textContent = T.size128;
     $('dl-uf2').textContent = T.downloadUf2;
     $('write-drive').textContent = T.writeDrive;
+    $('slot-label').textContent = T.slotLabel;
+    $('clear-slot').textContent = T.clearSlot;
     $('colors').options[0].textContent = T.colors16;
     $('colors').options[1].textContent = T.colors256;
     $('upload').textContent = T.upload;
@@ -885,7 +894,7 @@
       pvStop();
       // Motion needs at least 2 frames; until a usable file is loaded the
       // simple-loop checkbox stays locked in its default state.
-      $('m-loop').disabled = (n <= 1);
+      $('m-loop').disabled = (n <= 1) || isCard();
       if (n <= 1) $('m-loop').checked = true;
       $('f-start').max = n;
       $('f-end').max = n;
@@ -1335,7 +1344,8 @@
       log(T.logLoading(lastFile.name, lastFile.size));
       if (!await recompose(true)) return;   // parse error already logged
       const n = stripState.n;
-      if (!st.simpleLoop && n > 1 && st.strip) {
+      // The card ignores motion, so a preset's timeline is not restored there
+      if (!st.simpleLoop && n > 1 && st.strip && !isCard()) {
         const p = st.strip;
         if (!(p.rs >= 1 && p.rs <= p.re && p.re <= n)) throw new Error(T.errPresetRange(n));
         $('m-loop').checked = false;
@@ -1378,6 +1388,7 @@
     });
 
     // ---- Device selection ----
+    for (let i = 0; i < TARGETS.card.slots; i++) $('slot').add(new Option(i + 1, i));
     const applyDevice = () => {
       const card = $('device').value === 'card';
       $('ble-ui').hidden = card;
@@ -1387,19 +1398,28 @@
       $('size').disabled = card;
       if (card) $('size').value = '16';
       $('write-drive').hidden = !(card && window.showDirectoryPicker);
+      // The card plays a plain loop, so the timeline and motion settings stay hidden
+      $('motion-row').hidden = card;
+      if (card) $('m-loop').checked = true;
+      $('m-loop').disabled = card || stripState.n <= 1;
       rebuild();
     };
-    $('device').addEventListener('change', applyDevice);
+    $('device').addEventListener('change', () => { applyDevice(); updateMotionVis(); });
     applyDevice();
 
     // ---- UF2 (card) ----
-    // NOR image = 'PPNR' + uint32 payload length + 8 reserved + payload,
-    // carried as UF2 blocks of 256 B at consecutive NOR addresses.
-    const buildUf2 = (pay) => {
+    // Slot image = 'PPNR' + uint32 payload length + 8 reserved + payload,
+    // carried as UF2 blocks of 256 B at consecutive NOR addresses from the
+    // slot base. A cleared slot is a single all-zero page at the base.
+    const payloadImage = (pay) => {
       const image = new Uint8Array(16 + pay.length);
       image.set([0x50, 0x50, 0x4E, 0x52]);
       new DataView(image.buffer).setUint32(4, pay.length, true);
       image.set(pay, 16);
+      return image;
+    };
+    const buildUf2 = (image) => {
+      const base = ($('slot').value | 0) * target().slotStride;
       const n = Math.ceil(image.length / 256);
       const out = new Uint8Array(n * 512);
       for (let i = 0; i < n; i++) {
@@ -1408,7 +1428,7 @@
         v.setUint32(0, 0x0A324655, true);
         v.setUint32(4, 0x9E5D5157, true);
         v.setUint32(8, 0x2000, true);            // family id present
-        v.setUint32(12, i * 256, true);
+        v.setUint32(12, base + i * 256, true);
         v.setUint32(16, chunk.length, true);
         v.setUint32(20, i, true);
         v.setUint32(24, n, true);
@@ -1418,36 +1438,49 @@
       }
       return out;
     };
-    const uf2Name = () => lastFile.name.replace(/\.[^.]+$/, '') + '.uf2';
+    const slotSuffix = () => `.slot${($('slot').value | 0) + 1}`;
+    const uf2Name = () => lastFile.name.replace(/\.[^.]+$/, '') + slotSuffix() + '.uf2';
+    const clearName = () => 'clear' + slotSuffix() + '.uf2';
 
-    $('dl-uf2').addEventListener('click', () => {
-      if (!payload) return;
-      const uf2 = buildUf2(payload);
+    const downloadUf2 = (uf2, name) => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([uf2], { type: 'application/octet-stream' }));
-      a.download = uf2Name();
+      a.download = name;
       a.click();
       URL.revokeObjectURL(a.href);
-      log(T.logUf2Saved(a.download, uf2.length, uf2.length / 512));
-    });
+      log(T.logUf2Saved(name, uf2.length, uf2.length / 512));
+    };
 
     // Chromium only: write straight into the mounted PUCHIPIX volume. The
     // handle is kept for the session; any failure drops it so the next click
     // asks for the folder again.
     let driveDir = null;
-    $('write-drive').addEventListener('click', async () => {
-      if (!payload) return;
+    const writeUf2 = async (uf2, name) => {
       try {
         if (!driveDir) driveDir = await window.showDirectoryPicker({ mode: 'readwrite' });
-        const fh = await driveDir.getFileHandle(uf2Name(), { create: true });
+        const fh = await driveDir.getFileHandle(name, { create: true });
         const w = await fh.createWritable();
-        await w.write(buildUf2(payload));
+        await w.write(uf2);
         await w.close();
-        log(T.logDriveWritten(driveDir.name + '/' + uf2Name()));
+        log(T.logDriveWritten(driveDir.name + '/' + name));
       } catch (e) {
         driveDir = null;
         log(T.logDriveError(e.message));
       }
+    };
+
+    $('dl-uf2').addEventListener('click', () => {
+      if (!payload) return;
+      downloadUf2(buildUf2(payloadImage(payload)), uf2Name());
+    });
+    $('write-drive').addEventListener('click', () => {
+      if (!payload) return;
+      writeUf2(buildUf2(payloadImage(payload)), uf2Name());
+    });
+    $('clear-slot').addEventListener('click', () => {
+      const uf2 = buildUf2(new Uint8Array(256));
+      if (window.showDirectoryPicker) writeUf2(uf2, clearName());
+      else downloadUf2(uf2, clearName());
     });
 
     // ---- Motion block (embedded in the payload at bytes 8..23) ----
@@ -2065,6 +2098,7 @@
 
     // Debug/test hooks: current payload bytes, preset round-trip
     window._payload = () => payload;
+    window._uf2 = () => buildUf2(payloadImage(payload));
     window._exportPreset = exportPreset;
     window._applyPreset = applyPreset;
   </script>
